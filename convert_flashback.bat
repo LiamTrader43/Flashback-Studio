@@ -1,0 +1,314 @@
+@echo off
+rem convert_flashback.bat - turns Flashback clips (.flb) into MP4 videos.
+rem Part of Flashback-Studio: https://github.com/LiamTrader43/Flashback-Studio
+rem
+rem Usage:
+rem   - Drag one or more clip_*.flb files onto this file, or
+rem   - Double-click it to convert every clip in the same folder as this file.
+rem
+rem Needs ffmpeg (https://ffmpeg.org) on PATH. Clips that already have an .mp4
+rem are skipped. Clips saved by older Flashback builds (.raw + .txt) work too.
+rem
+rem .flb clips are compressed in Flashback's own format, which only this
+rem converter can read: the PowerShell part at the end of this file decodes
+rem them and streams the frames to ffmpeg.
+
+setlocal
+
+where ffmpeg >nul 2>nul
+if errorlevel 1 (
+    echo ffmpeg was not found. Install it from https://ffmpeg.org and add its bin folder to PATH.
+    pause
+    exit /b 1
+)
+
+set "FB_SELF=%~f0"
+set "FB_ARGS=%*"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=[IO.File]::ReadAllText($env:FB_SELF); $i=$s.IndexOf('FLASHBACK_PS'+'_BELOW'); iex $s.Substring($s.IndexOf([char]10,$i)+1)"
+
+echo.
+pause
+exit /b 0
+
+rem ---- Everything below is the PowerShell converter. FLASHBACK_PS_BELOW
+$ErrorActionPreference = 'Stop'
+
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Diagnostics;
+using System.Text;
+
+// Reader for Flashback clip files (.flb). The layout is documented next to
+// flashbackSaveClipFile in sysmodules/rosalina/source/flashback.c of
+// Luma3DS-Flashback (https://github.com/LiamTrader43/Luma3DS-Flashback):
+//   [ring slots]  slot i at offset i * slotStride: a compressed frame, or the
+//                 raw frame if its stored size is slotBytes
+//   [index]       entryCount x { u32 slot, u32 size, u32 copies }, oldest first
+//   [trailer]     the last 48 bytes: magic "FLBK", version, width, height, fps,
+//                 slotStride, slotBytes, entryCount, frameCount, indexOffset
+public static class FlashbackClip
+{
+    const uint Magic = 0x4B424C46;  // "FLBK"
+    const int TrailerSize = 48;
+
+    public class Info { public int Width, Height, Fps, Frames; }
+
+    static uint U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
+
+    static void ReadFully(Stream s, byte[] buf, int len)
+    {
+        int got = 0;
+        while (got < len)
+        {
+            int n = s.Read(buf, got, len - got);
+            if (n <= 0) throw new Exception("the file ends early (was it copied completely?)");
+            got += n;
+        }
+    }
+
+    // Port of flashbackDecompress: QOI-style ops on RGB565 pixels.
+    static bool Unpack(byte[] src, int len, ushort[] dst, int pixels)
+    {
+        ushort[] index = new ushort[64];
+        ushort px = 0;
+        int p = 0, i = 0;
+        while (i < pixels)
+        {
+            if (p >= len) return false;
+            int b = src[p++];
+            if (b == 0xFE)
+            {
+                if (len - p < 2) return false;
+                px = (ushort)(src[p] | (src[p + 1] << 8));
+                p += 2;
+            }
+            else if ((b & 0xC0) == 0xC0)
+            {
+                int run = (b & 0x3F) + 1;
+                if (run > pixels - i) return false;
+                while (run-- > 0) dst[i++] = px;
+                continue;
+            }
+            else if ((b & 0xC0) == 0x00)
+            {
+                px = index[b];
+                dst[i++] = px;
+                continue;
+            }
+            else
+            {
+                int dr, dg, db;
+                if ((b & 0xC0) == 0x40)
+                {
+                    dr = ((b >> 4) & 3) - 2;
+                    dg = ((b >> 2) & 3) - 2;
+                    db = (b & 3) - 2;
+                }
+                else
+                {
+                    if (p >= len) return false;
+                    int b2 = src[p++];
+                    dg = (b & 0x3F) - 32;
+                    dr = ((b2 >> 4) - 8) + (dg >> 1);
+                    db = ((b2 & 0xF) - 8) + (dg >> 1);
+                }
+                int r = ((px >> 11) + dr) & 0x1F;
+                int g = (((px >> 5) & 0x3F) + dg) & 0x3F;
+                int bl = ((px & 0x1F) + db) & 0x1F;
+                px = (ushort)((r << 11) | (g << 5) | bl);
+            }
+            index[(int)(unchecked((uint)px * 0x9E3779B1u) >> 26)] = px;
+            dst[i++] = px;
+        }
+        return p == len;
+    }
+
+    // Decodes every frame of a clip, oldest first, handing each one (RGB565
+    // little-endian, top row first) to 'sink' along with how many times it repeats.
+    public static Info Read(string path, Action<byte[], int> sink)
+    {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+        {
+            long length = fs.Length;
+            if (length < TrailerSize) throw new Exception("not a Flashback clip (file too small)");
+
+            byte[] t = new byte[TrailerSize];
+            fs.Seek(length - TrailerSize, SeekOrigin.Begin);
+            ReadFully(fs, t, TrailerSize);
+            if (U32(t, 0) != Magic) throw new Exception("not a Flashback clip (or the copy is incomplete)");
+            if (U32(t, 4) != 1) throw new Exception("made by a newer Flashback version; get the latest convert_flashback.bat");
+
+            int width = (int)U32(t, 8), height = (int)U32(t, 12), fps = (int)U32(t, 16);
+            long stride = U32(t, 20);
+            int slotBytes = (int)U32(t, 24), entries = (int)U32(t, 28), frames = (int)U32(t, 32);
+            long indexOffset = U32(t, 36);
+            if (width <= 0 || height <= 0 || width > 800 || height > 480 || slotBytes != width * height * 2 ||
+                fps <= 0 || fps > 60 || stride < slotBytes || entries < 0 ||
+                indexOffset + (long)entries * 12 + TrailerSize != length)
+                throw new Exception("the clip's header is damaged");
+
+            byte[] idx = new byte[entries * 12];
+            fs.Seek(indexOffset, SeekOrigin.Begin);
+            ReadFully(fs, idx, idx.Length);
+
+            int pixels = width * height;
+            byte[] stored = new byte[slotBytes];
+            ushort[] decoded = new ushort[pixels];
+            byte[] frame = new byte[slotBytes];
+            long total = 0;
+
+            for (int e = 0; e < entries; e++)
+            {
+                long slot = U32(idx, e * 12);
+                int size = (int)U32(idx, e * 12 + 4);
+                int copies = (int)U32(idx, e * 12 + 8);
+                if (size <= 0 || size > slotBytes || copies <= 0 || slot * stride + size > indexOffset)
+                    throw new Exception(string.Format("frame entry {0} is damaged", e));
+
+                fs.Seek(slot * stride, SeekOrigin.Begin);
+                ReadFully(fs, stored, size);
+                if (size == slotBytes)
+                    Buffer.BlockCopy(stored, 0, frame, 0, slotBytes);
+                else
+                {
+                    if (!Unpack(stored, size, decoded, pixels))
+                        throw new Exception(string.Format("frame {0} is damaged", e));
+                    Buffer.BlockCopy(decoded, 0, frame, 0, slotBytes);
+                }
+                sink(frame, copies);
+                total += copies;
+            }
+
+            if (total != frames) throw new Exception("the clip's frame count doesn't match its index");
+            Info info = new Info();
+            info.Width = width; info.Height = height; info.Fps = fps; info.Frames = frames;
+            return info;
+        }
+    }
+
+    // Decodes a clip straight into ffmpeg, which writes the MP4.
+    public static Info ToMp4(string path, string mp4)
+    {
+        Info info = Read(path, delegate(byte[] f, int c) { });   // validate everything before starting ffmpeg
+
+        ProcessStartInfo psi = new ProcessStartInfo("ffmpeg", string.Format(
+            "-hide_banner -loglevel error -n -f rawvideo -pixel_format rgb565le -video_size {0}x{1} -framerate {2} -i - " +
+            "-vf \"scale=iw*2:ih*2:flags=neighbor\" -c:v libx264 -crf 12 -pix_fmt yuv420p \"{3}\"",
+            info.Width, info.Height, info.Fps, mp4));
+        psi.UseShellExecute = false;
+        psi.RedirectStandardInput = true;
+
+        // .NET wraps ffmpeg's input in a text writer using the console's input
+        // encoding; when that's UTF-8 it writes a 3-byte byte-order mark first,
+        // which would shift every frame. Start ffmpeg with BOM-less UTF-8.
+        Encoding savedEncoding = Console.InputEncoding;
+        Process started;
+        try { Console.InputEncoding = new UTF8Encoding(false); } catch (Exception) { }
+        try { started = Process.Start(psi); }
+        finally { try { Console.InputEncoding = savedEncoding; } catch (Exception) { } }
+
+        using (Process p = started)
+        {
+            Stream stdin = p.StandardInput.BaseStream;
+            try
+            {
+                Read(path, delegate(byte[] f, int copies)
+                {
+                    for (int c = 0; c < copies; c++)
+                        stdin.Write(f, 0, f.Length);
+                });
+            }
+            catch (IOException) { }     // ffmpeg stopped early; its exit code says why
+            finally { try { stdin.Close(); } catch (IOException) { } }
+            p.WaitForExit();
+            if (p.ExitCode != 0)
+            {
+                try { File.Delete(mp4); } catch (Exception) { }
+                throw new Exception("ffmpeg failed (exit code " + p.ExitCode + ")");
+            }
+        }
+        return info;
+    }
+
+    // Decodes a clip into a raw RGB565 file (frames back to back), e.g. for other tools.
+    public static Info ToRaw(string path, string rawOut)
+    {
+        using (FileStream o = new FileStream(rawOut, FileMode.Create, FileAccess.Write))
+        {
+            return Read(path, delegate(byte[] f, int copies)
+            {
+                for (int c = 0; c < copies; c++)
+                    o.Write(f, 0, f.Length);
+            });
+        }
+    }
+}
+'@
+
+function Get-Reason($err)
+{
+    $e = $err.Exception
+    while ($e.InnerException) { $e = $e.InnerException }
+    return $e.Message
+}
+
+$here = Split-Path -Parent $env:FB_SELF
+if ([string]::IsNullOrWhiteSpace($env:FB_ARGS)) {
+    # .flb clips, plus .raw clips from older builds (those always have a .txt next to them).
+    $files = @(Get-ChildItem -LiteralPath $here -File |
+        Where-Object { $_.Name -like 'clip_*' -and ($_.Extension -eq '.flb' -or
+                       ($_.Extension -eq '.raw' -and (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($_.FullName, '.txt'))))) } |
+        ForEach-Object { $_.FullName })
+} else {
+    $files = @([regex]::Matches($env:FB_ARGS, '"([^"]+)"|(\S+)') |
+        ForEach-Object { if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value } })
+}
+
+if ($files.Count -eq 0) {
+    Write-Host "No Flashback clips (clip_*.flb) found next to this file."
+    Write-Host "Drag clips onto convert_flashback.bat, or put it in the folder with your clips."
+}
+
+$converted = 0; $skipped = 0; $failed = 0
+foreach ($f in $files) {
+    $name = [IO.Path]::GetFileName($f)
+    $ext = [IO.Path]::GetExtension($f).ToLowerInvariant()
+    $mp4 = [IO.Path]::ChangeExtension($f, '.mp4')
+    $mp4Name = [IO.Path]::GetFileName($mp4)
+
+    if ($ext -ne '.flb' -and $ext -ne '.raw') {
+        Write-Host "Skipping ${name}: not a Flashback clip (.flb)."
+        $skipped++; continue
+    }
+    if (Test-Path -LiteralPath $mp4) {
+        Write-Host "Skipping ${name}: $mp4Name already exists."
+        $skipped++; continue
+    }
+
+    Write-Host "Converting $name..."
+    try {
+        if ($ext -eq '.flb') {
+            $info = [FlashbackClip]::ToMp4($f, $mp4)
+            Write-Host ("  Saved {0} ({1}x{2}, {3} fps, {4} frames)" -f $mp4Name, $info.Width, $info.Height, $info.Fps, $info.Frames)
+        } else {
+            # Clips from older Flashback builds: raw frames, described by a .txt.
+            $txt = [IO.Path]::ChangeExtension($f, '.txt')
+            if (-not (Test-Path -LiteralPath $txt)) { throw "its .txt is missing, so its resolution and frame rate are unknown" }
+            $t = Get-Content -LiteralPath $txt -Raw
+            $res = [regex]::Match($t, 'Resolution:\s+(\d+x\d+)').Groups[1].Value
+            $fps = [regex]::Match($t, 'Frame rate:\s+(\d+)').Groups[1].Value
+            if (-not $res -or -not $fps) { throw "couldn't read the resolution or frame rate from its .txt" }
+            & ffmpeg -hide_banner -loglevel error -n -f rawvideo -pixel_format rgb565le -video_size $res -framerate $fps -i $f -vf "scale=iw*2:ih*2:flags=neighbor" -c:v libx264 -crf 12 -pix_fmt yuv420p $mp4
+            if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed (exit code $LASTEXITCODE)" }
+            Write-Host "  Saved $mp4Name"
+        }
+        $converted++
+    } catch {
+        Write-Host "  Failed: $(Get-Reason $_)" -ForegroundColor Red
+        $failed++
+    }
+}
+
+Write-Host ""
+Write-Host "Done: $converted converted, $skipped skipped, $failed failed."
