@@ -9,7 +9,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 | Tool | Status | What it does |
 |---|---|---|
 | `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
-| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself (picture only, for now), and compacts them to about half their size (trimming and exporting are planned) |
+| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, and compacts them to about half their size (trimming and exporting are planned) |
 
 ## Converting clips to MP4 (Windows)
 
@@ -54,7 +54,7 @@ Flashback Studio is a homebrew app that lists the clips on your SD card and play
 
 ### Using it
 
-The bottom screen lists the clips in `/luma/flashback/`, newest first, with their length and size. The selected clip's first frame shows on the top screen, and its resolution, frame rate, whether it has sound, and number of missed frames below the list. (The player doesn't play the sound yet: convert the clip to hear it.) Half resolution clips are shown at twice their size, so they fill the screen.
+The bottom screen lists the clips in `/luma/flashback/`, newest first, with their length and size. The selected clip's first frame shows on the top screen, and its resolution, frame rate, whether it has sound, and number of missed frames below the list. Half resolution clips are shown at twice their size, so they fill the screen.
 
 | Clip list | |
 |---|---|
@@ -73,11 +73,13 @@ The bottom screen lists the clips in `/luma/flashback/`, newest first, with thei
 | L/R | Back/forward 1 second |
 | Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
 | Y | Loop on/off |
-| X | Show/hide timing (how long each frame takes to read and draw) |
+| X | Show/hide timing (how long each frame takes to read and draw, and how close the sound is to the picture) |
 | Touch the bar | Jump to that point |
 | B | Back to the clip list |
 
 Red marks under the progress bar show where the recorder missed frames (they're filled with copies of the frame before, so the clip plays at the right speed). On a missed frame, the player says so.
+
+Clips recorded with audio play their sound at normal speed. It's muted while paused, while stepping through frames, while you touch the bar, and at the other speeds. The player shows which, below the time. The sound needs the DSP firmware dump `/3ds/dspfirm.cdc` on the SD card, like every homebrew app with sound. If you've used one before, you have it; otherwise make it with [DSP1](https://github.com/zoogie/DSP1). Without it, clips play silently.
 
 ### Compacting clips
 

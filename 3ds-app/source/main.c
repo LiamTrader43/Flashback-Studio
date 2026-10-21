@@ -4,6 +4,8 @@
 // The bottom screen is a text console (clip list, playback controls); the top
 // screen shows the clip, drawn by the CPU into an RGB565 framebuffer. Half
 // resolution clips (200x120) are shown at twice their size to fill the screen.
+// Clips recorded with audio play it through NDSP (which needs the DSP firmware
+// dump sd:/3ds/dspfirm.cdc, as all homebrew with sound does).
 
 #include <3ds.h>
 
@@ -77,6 +79,18 @@ typedef struct Player {
     bool showStats;
     u32 decodeUs, drawUs;   // last frame's read + decode, and drawing, times
     u32 skipped;            // stored frames passed over without being shown
+
+    // Audio: streamed from the clip through AUDIO_BUFS NDSP wave buffers.
+    bool scrubbing;         // the bar is being touched (no sound meanwhile)
+    bool clockMoved;        // the picture's clock was set (a jump, a loop, play): restart the sound
+    bool audioQueued;       // wave buffers are queued (the sound is playing)
+    const char *audioError;
+    u32 audioNext;          // the next sample to queue (counting from the clip's first frame)
+    u32 audioStart[4];      // first sample of each wave buffer
+    u32 audioStopped;       // ndspGetFrameCount() when the buffers were last cleared
+    s32 audioOffsetMs;      // how far the sound is ahead of the picture (last check)
+    u64 audioCheckTick;
+    ndspWaveBuf wave[4];
 } Player;
 
 static PrintConsole g_con;
@@ -84,6 +98,13 @@ static Clip *g_clips;
 static int g_clipCount;
 static u16 *g_frame;        // one decoded frame
 static Player g_player;
+
+#define AUDIO_BUFS          4
+#define AUDIO_BUF_SAMPLES   4096    // 125 ms each: half a second queued
+#define AUDIO_NUDGE_MS      15      // move the picture to the sound if they're further apart than this...
+#define AUDIO_RESTART_MS    300     // ...or restart the sound if they're further apart than this
+static bool g_ndsp;                 // NDSP started (else: no sound)
+static s16 *g_audioMem;             // the wave buffers' samples (linear memory, for the DSP)
 static FlbCompactor g_compactor;
 static char g_messageText[96];
 
@@ -565,6 +586,7 @@ static void playerRebase(Player *p)
 {
     p->baseTick = svcGetSystemTick();
     p->baseFrame = p->frame;
+    p->clockMoved = true;
 }
 
 static u32 playerClockFrame(const Player *p)
@@ -578,6 +600,142 @@ static void playerSeek(Player *p, s32 frame)
     s32 last = (s32)p->clip.info.frameCount - 1;
     p->frame = frame < 0 ? 0 : frame > last ? (u32)last : (u32)frame;
     playerRebase(p);
+}
+
+// The audio sample (counting from the clip's first frame) at which clip frame
+// 'frame' starts, the same way the converter places the audio.
+static u32 audioSampleForFrame(const Player *p, u32 frame)
+{
+    const FlbInfo *info = &p->clip.info;
+    return (u32)((u64)frame * info->audioRateMhz / ((u64)info->fps * 1000));
+}
+
+// Where the picture is, in audio samples (at 1x speed, the only one with sound).
+static u32 audioClockSample(const Player *p)
+{
+    u64 elapsed = svcGetSystemTick() - p->baseTick;
+    return audioSampleForFrame(p, p->baseFrame) +
+           (u32)(elapsed * p->clip.info.audioRateMhz / ((u64)SYSCLOCK_ARM11 * 1000));
+}
+
+static void audioStop(Player *p)
+{
+    if (!p->audioQueued)
+        return;
+    ndspChnWaveBufClear(0);
+    p->audioQueued = false;
+    p->audioStopped = ndspGetFrameCount();
+}
+
+static void audioFill(Player *p, int i)
+{
+    const FlbInfo *info = &p->clip.info;
+    u32 total = flbAudioSamples(info);
+    u32 n = total - p->audioNext < AUDIO_BUF_SAMPLES ? total - p->audioNext : AUDIO_BUF_SAMPLES;
+    s16 *data = g_audioMem + i * AUDIO_BUF_SAMPLES * 2;
+
+    if (!flbReadAudio(&p->clip, p->clip.entries[0].audioPos + p->audioNext, n, data, &p->audioError))
+    {
+        audioStop(p);
+        return;
+    }
+    DSP_FlushDataCache(data, n * 4);
+
+    ndspWaveBuf *w = &p->wave[i];
+    memset(w, 0, sizeof(*w));
+    w->data_pcm16 = data;
+    w->nsamples = n;
+    ndspChnWaveBufAdd(0, w);
+    p->audioStart[i] = p->audioNext;
+    p->audioNext += n;
+}
+
+// Starts the sound at sample 'sample'.
+static void audioStartAt(Player *p, u32 sample)
+{
+    // Buffers cleared just before are only let go once NDSP has passed the
+    // clear on to the DSP, a frame or two later (~5 ms each).
+    while (ndspGetFrameCount() - p->audioStopped < 3)
+        svcSleepThread(1000 * 1000LL);
+
+    memset(p->wave, 0, sizeof(p->wave));
+    p->audioNext = sample;
+    p->audioQueued = true;
+    for (int i = 0; i < AUDIO_BUFS && p->audioQueued && p->audioNext < flbAudioSamples(&p->clip.info); i++)
+        audioFill(p, i);
+    // First check 0.1 s in, once it's surely playing (see playerAudio).
+    p->audioCheckTick = svcGetSystemTick() - SYSCLOCK_ARM11 / 2 + SYSCLOCK_ARM11 / 10;
+}
+
+// The sample being played right now, or UINT32_MAX if none is.
+static u32 audioPlayingSample(const Player *p)
+{
+    for (int i = 0; i < AUDIO_BUFS; i++)
+        if (p->wave[i].status == NDSP_WBUF_PLAYING)
+            return p->audioStart[i] + ndspChnGetSamplePos(0);
+    return UINT32_MAX;
+}
+
+// Once per frame: plays the sound when the picture plays at 1x (not paused,
+// stepping or scrubbing), and refills played buffers. The sound starts a little
+// after it's asked to (old buffers to let go of, new ones to read), so shortly
+// after it starts, and twice a second after that, the picture's clock is moved
+// to match it. If they're far apart (the HOME menu, the SD card falling behind),
+// the sound starts over at the right place instead.
+static void playerAudio(Player *p)
+{
+    const FlbInfo *info = &p->clip.info;
+    bool want = g_ndsp && info->hasAudio && p->audioError == NULL && p->error == NULL &&
+                p->playing && p->speed == SPEED_NORMAL && !p->scrubbing;
+
+    if (!want)
+    {
+        p->clockMoved = false;
+        audioStop(p);
+        return;
+    }
+    if (!p->audioQueued || p->clockMoved)
+    {
+        p->clockMoved = false;
+        audioStop(p);
+        audioStartAt(p, audioClockSample(p));
+        return;
+    }
+
+    for (int i = 0; i < AUDIO_BUFS && p->audioQueued; i++)
+        if (p->wave[i].status == NDSP_WBUF_DONE && p->audioNext < flbAudioSamples(info))
+            audioFill(p, i);
+
+    u64 now = svcGetSystemTick();
+    if (now - p->audioCheckTick >= SYSCLOCK_ARM11 / 2)
+    {
+        p->audioCheckTick = now;
+        u32 playing = audioPlayingSample(p), clock = audioClockSample(p);
+        if (playing != UINT32_MAX)
+        {
+            s64 ahead = (s64)playing - (s64)clock;      // samples the sound is ahead of the picture
+            p->audioOffsetMs = (s32)(ahead * 1000000 / info->audioRateMhz);
+            if (p->audioOffsetMs > AUDIO_RESTART_MS || p->audioOffsetMs < -AUDIO_RESTART_MS)
+            {
+                audioStop(p);
+                audioStartAt(p, audioClockSample(p));
+            }
+            else if (p->audioOffsetMs > AUDIO_NUDGE_MS || p->audioOffsetMs < -AUDIO_NUDGE_MS)
+                p->baseTick -= ahead * (s64)SYSCLOCK_ARM11 * 1000 / info->audioRateMhz;    // (not playerRebase: the sound carries on)
+        }
+        else
+        {
+            // Nothing queued with sound still to come: it ran dry. Start over.
+            bool active = false;
+            for (int i = 0; i < AUDIO_BUFS; i++)
+                active |= p->wave[i].status == NDSP_WBUF_QUEUED || p->wave[i].status == NDSP_WBUF_PLAYING;
+            if (!active && p->audioNext < flbAudioSamples(info))
+            {
+                audioStop(p);
+                audioStartAt(p, clock);
+            }
+        }
+    }
 }
 
 static bool playerOpen(Player *p, const Clip *c, const char **error)
@@ -595,6 +753,18 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
     p->shownEntry = UINT32_MAX;
     p->speed = SPEED_NORMAL;
     p->playing = true;
+
+    // The recorder keeps the DSP's own sample rate, so the sound plays as is.
+    if (g_ndsp && p->clip.info.hasAudio)
+    {
+        float rate = p->clip.info.audioRateMhz / 1000.0f;
+        ndspChnReset(0);
+        ndspChnSetInterp(0, rate > 32700.0f && rate < 32760.0f ? NDSP_INTERP_NONE : NDSP_INTERP_POLYPHASE);
+        ndspChnSetRate(0, rate);
+        ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+        float mix[12] = { 1.0f, 1.0f };
+        ndspChnSetMix(0, mix);
+    }
 
     // Mark where frames were missed (the copies of each stored frame).
     u32 count = p->clip.info.frameCount;
@@ -670,6 +840,21 @@ static void drawPlayer(const Player *p)
     else
         row(8, C_NORMAL, "");
 
+    if (!info->hasAudio)
+        row(9, C_DIM, " No sound (recorded without audio)");
+    else if (!g_ndsp)
+        row(9, C_WARN, " No sound: needs sd:/3ds/dspfirm.cdc");
+    else if (p->audioError != NULL)
+        row(9, C_WARN, " No sound: %s", p->audioError);
+    else if (p->audioQueued)
+        row(9, C_NORMAL, " Sound on");
+    else if (!p->playing)
+        row(9, C_DIM, " Sound: muted while paused");
+    else if (p->speed != SPEED_NORMAL)
+        row(9, C_DIM, " Sound: muted at %s speed", kSpeedNames[p->speed]);
+    else
+        row(9, C_DIM, " Sound: muted");
+
     if (p->error != NULL)
         wrapRows(10, 12, C_WARN, p->error);
     else if (p->showStats)
@@ -677,7 +862,10 @@ static void drawPlayer(const Player *p)
         row(10, C_DIM, " Read + decode %lu.%lu ms, draw %lu.%lu ms", p->decodeUs / 1000, p->decodeUs / 100 % 10,
             p->drawUs / 1000, p->drawUs / 100 % 10);
         row(11, C_DIM, " Frames skipped to keep up: %lu", p->skipped);
-        row(12, C_NORMAL, "");
+        if (p->audioQueued)
+            row(12, C_DIM, " Sound vs picture: %+ld ms", p->audioOffsetMs);
+        else
+            row(12, C_NORMAL, "");
     }
     else
         clearRows(10, 12);
@@ -731,12 +919,14 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
         p->loop = !p->loop;
     if (down & KEY_X)
         p->showStats = !p->showStats;
+    p->scrubbing = false;
     if (held & KEY_TOUCH)
     {
         touchPosition touch;
         hidTouchRead(&touch);
         if (touch.py >= BAR_TOUCH_Y0 && touch.py < BAR_TOUCH_Y1)
         {
+            p->scrubbing = true;
             s32 x = (s32)touch.px - BAR_X;
             x = x < 0 ? 0 : x >= BAR_W ? BAR_W - 1 : x;
             playerSeek(p, count > 1 ? (s32)((u64)x * (count - 1) / (BAR_W - 1)) : 0);
@@ -798,6 +988,11 @@ int main(void)
     g_frame = malloc(TOP_W * TOP_H * 2);
     g_player.loop = true;
 
+    g_audioMem = linearAlloc(AUDIO_BUFS * AUDIO_BUF_SAMPLES * 4);
+    g_ndsp = g_audioMem != NULL && R_SUCCEEDED(ndspInit());
+    if (g_ndsp)
+        ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+
     ListState ls = { .previewFor = -1 };
     bool playing = false, dirty = true;
     u64 lastTick = svcGetSystemTick();
@@ -825,6 +1020,7 @@ int main(void)
         {
             if (!playerUpdate(&g_player, down, repeat, held))
             {
+                audioStop(&g_player);
                 flbClose(&g_player.clip);
                 playing = false;
                 consoleClear();
@@ -835,7 +1031,10 @@ int main(void)
                 dirty = true;
             }
             else
+            {
+                playerAudio(&g_player);
                 drawPlayer(&g_player);
+            }
         }
         else if (ls.compacting)
         {
@@ -1031,7 +1230,14 @@ int main(void)
     }
 
     if (playing)
+    {
+        audioStop(&g_player);
         flbClose(&g_player.clip);
+    }
+    if (g_ndsp)
+        ndspExit();
+    if (g_audioMem != NULL)
+        linearFree(g_audioMem);
     if (ls.compacting)
         flbCompactCancel(&g_compactor);
     free(g_frame);
