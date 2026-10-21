@@ -83,9 +83,9 @@ Clips recorded with audio play their sound at normal speed. It's muted while pau
 
 ### Compacting clips
 
-A clip is as big as the uncompressed footage (a 60-second full resolution clip is 346 MB), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (that 346 MB clip became 167 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
+A clip is as big as the uncompressed footage (a 60-second full resolution clip with sound is 354 MB), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (that 354 MB clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
 
-Select a clip and press R. The details under the list show how big it will be. Compacting takes about as long as writing the compacted size to the SD card, so up to a minute or so for a long full resolution clip, and B cancels it at any time.
+Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds, and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
