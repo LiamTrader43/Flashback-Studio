@@ -176,7 +176,14 @@ static void formatTime(u32 frame, u32 fps, char *out, size_t size)
 
 static void formatResolution(const FlbInfo *info, char *out, size_t size)
 {
-    if (info->width == 400 && info->height == 240)
+    // (With sound there isn't room for the size as well.)
+    if (info->hasAudio && info->width == 400 && info->height == 240)
+        snprintf(out, size, "Full resolution, %lu fps, with sound", info->fps);
+    else if (info->hasAudio && info->width == 200 && info->height == 120)
+        snprintf(out, size, "Half resolution, %lu fps, with sound", info->fps);
+    else if (info->hasAudio)
+        snprintf(out, size, "%lux%lu, %lu fps, with sound", info->width, info->height, info->fps);
+    else if (info->width == 400 && info->height == 240)
         snprintf(out, size, "Full resolution (400x240), %lu fps", info->fps);
     else if (info->width == 200 && info->height == 120)
         snprintf(out, size, "Half resolution (200x120), %lu fps", info->fps);
@@ -467,7 +474,7 @@ static void drawList(const ListState *ls)
                 row(23, C_NORMAL, "No missed frames");
             else
                 row(23, C_NORMAL, "Missed frames: %lu (shown as copies)", missed);
-            if (c->info.version == 2)
+            if (flbIsCompacted(&c->info))
                 row(24, C_DIM, "Compacted");
             else if (c->compactSize != 0)
             {
@@ -970,7 +977,7 @@ int main(void)
                 Clip *c = &g_clips[ls.selected];
                 if (c->error == NULL)
                 {
-                    if (c->info.version == 2)
+                    if (flbIsCompacted(&c->info))
                         setMessage(&ls, "This clip is already compacted.", true);
                     else
                     {

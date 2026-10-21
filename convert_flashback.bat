@@ -7,7 +7,8 @@ rem   - Drag one or more clip_*.flb files onto this file, or
 rem   - Double-click it to convert every clip in the same folder as this file.
 rem
 rem Needs ffmpeg (https://ffmpeg.org) on PATH. Clips that already have an .mp4
-rem are skipped. Clips saved by older Flashback builds (.raw + .txt) work too.
+rem are skipped. Clips recorded with audio get it as an AAC track. Clips saved
+rem by older Flashback builds (.raw + .txt) work too.
 rem
 rem .flb clips are compressed in Flashback's own format, which only this
 rem converter can read: the PowerShell part at the end of this file decodes
@@ -50,12 +51,23 @@ using System.Text;
 // Version 2 is a clip compacted by the Flashback Studio 3DS app (see its
 // 3ds-app/source/flb.h): the frames back to back, and each index entry's first
 // field is the frame's offset in the file instead of its slot (slotStride is 0).
+// Version 3 is a clip with audio (recorded, or compacted): index entries are
+// { u32 offset, u32 size, u32 copies, u32 audioPos } (audioPos: the audio
+// sample at which the frame is first shown), followed by 32 bytes of audio
+// info: { u32 sampleRate (mHz), u16 channels, u16 bits, u32 offset,
+// u32 capacity, u32 first, u32 end, u32 missed, u32 reserved }; stereo PCM16
+// sample i is at offset + (i % capacity) * 4, and first .. end - 1 are held.
 public static class FlashbackClip
 {
     const uint Magic = 0x4B424C46;  // "FLBK"
     const int TrailerSize = 48;
 
-    public class Info { public int Width, Height, Fps, Frames; }
+    public class Info
+    {
+        public int Width, Height, Fps, Frames;
+        public bool HasAudio;
+        public long AudioRateMhz, AudioOffset, AudioCapacity, AudioFirst, AudioEnd, AudioStart;
+    }
 
     static uint U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
 
@@ -141,7 +153,9 @@ public static class FlashbackClip
             ReadFully(fs, t, TrailerSize);
             if (U32(t, 0) != Magic) throw new Exception("not a Flashback clip (or the copy is incomplete)");
             uint version = U32(t, 4);
-            if (version != 1 && version != 2) throw new Exception("made by a newer Flashback version; get the latest convert_flashback.bat");
+            if (version < 1 || version > 3) throw new Exception("made by a newer Flashback version; get the latest convert_flashback.bat");
+            int entrySize = version == 3 ? 16 : 12;
+            int audioInfoSize = version == 3 ? 32 : 0;
 
             int width = (int)U32(t, 8), height = (int)U32(t, 12), fps = (int)U32(t, 16);
             long stride = U32(t, 20);
@@ -149,12 +163,31 @@ public static class FlashbackClip
             long indexOffset = U32(t, 36);
             if (width <= 0 || height <= 0 || width > 800 || height > 480 || slotBytes != width * height * 2 ||
                 fps <= 0 || fps > 60 || (version == 1 && stride < slotBytes) || entries < 0 ||
-                indexOffset + (long)entries * 12 + TrailerSize != length)
+                indexOffset + (long)entries * entrySize + audioInfoSize + TrailerSize != length)
                 throw new Exception("the clip's header is damaged");
 
-            byte[] idx = new byte[entries * 12];
+            byte[] idx = new byte[entries * entrySize + audioInfoSize];
             fs.Seek(indexOffset, SeekOrigin.Begin);
             ReadFully(fs, idx, idx.Length);
+
+            Info info = new Info();
+            info.Width = width; info.Height = height; info.Fps = fps; info.Frames = frames;
+            if (version == 3)
+            {
+                int a = entries * entrySize;
+                info.HasAudio = true;
+                info.AudioRateMhz = U32(idx, a);
+                info.AudioOffset = U32(idx, a + 8);
+                info.AudioCapacity = U32(idx, a + 12);
+                info.AudioFirst = U32(idx, a + 16);
+                info.AudioEnd = U32(idx, a + 20);
+                info.AudioStart = entries > 0 ? U32(idx, 12) : 0;
+                if (BitConverter.ToUInt16(idx, a + 4) != 2 || BitConverter.ToUInt16(idx, a + 6) != 16 ||
+                    info.AudioRateMhz < 8000000 || info.AudioRateMhz > 96000000 || info.AudioCapacity == 0 ||
+                    info.AudioOffset + info.AudioCapacity * 4 > indexOffset || info.AudioFirst > info.AudioEnd ||
+                    info.AudioEnd - info.AudioFirst > info.AudioCapacity)
+                    throw new Exception("the clip's audio header is damaged");
+            }
 
             int pixels = width * height;
             byte[] stored = new byte[slotBytes];
@@ -164,10 +197,10 @@ public static class FlashbackClip
 
             for (int e = 0; e < entries; e++)
             {
-                long where = U32(idx, e * 12);     // version 1: ring slot, version 2: offset
+                long where = U32(idx, e * entrySize);     // version 1: ring slot, versions 2 and 3: offset
                 long offset = version == 1 ? where * stride : where;
-                int size = (int)U32(idx, e * 12 + 4);
-                int copies = (int)U32(idx, e * 12 + 8);
+                int size = (int)U32(idx, e * entrySize + 4);
+                int copies = (int)U32(idx, e * entrySize + 8);
                 if (size <= 0 || size > slotBytes || copies <= 0 || offset + size > indexOffset)
                     throw new Exception(string.Format("frame entry {0} is damaged", e));
 
@@ -186,21 +219,90 @@ public static class FlashbackClip
             }
 
             if (total != frames) throw new Exception("the clip's frame count doesn't match its index");
-            Info info = new Info();
-            info.Width = width; info.Height = height; info.Fps = fps; info.Frames = frames;
             return info;
         }
     }
 
-    // Decodes a clip straight into ffmpeg, which writes the MP4.
+    static void Put32(byte[] b, int o, long v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); b[o + 2] = (byte)(v >> 16); b[o + 3] = (byte)(v >> 24); }
+    static void Put16(byte[] b, int o, int v) { b[o] = (byte)v; b[o + 1] = (byte)(v >> 8); }
+
+    // Writes the clip's audio, as long as the clip, to a WAV file: from the
+    // sample at which the first frame is shown, frames / fps seconds of it.
+    // Samples the clip doesn't hold (before recording started, ...) are silence.
+    public static void WriteWav(string path, Info info, string wav)
+    {
+        double rate = info.AudioRateMhz / 1000.0;
+        long count = (long)Math.Round(info.Frames * rate / info.Fps);
+        byte[] header = new byte[44];
+        Encoding.ASCII.GetBytes("RIFF").CopyTo(header, 0);
+        Put32(header, 4, 36 + count * 4);
+        Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(header, 8);
+        Put32(header, 16, 16);
+        Put16(header, 20, 1);                       // PCM
+        Put16(header, 22, 2);                       // stereo
+        Put32(header, 24, (long)Math.Round(rate));
+        Put32(header, 28, (long)Math.Round(rate) * 4);
+        Put16(header, 32, 4);
+        Put16(header, 34, 16);
+        Encoding.ASCII.GetBytes("data").CopyTo(header, 36);
+        Put32(header, 40, count * 4);
+
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+        using (FileStream o = new FileStream(wav, FileMode.Create, FileAccess.Write))
+        {
+            o.Write(header, 0, header.Length);
+            byte[] buf = new byte[65536 * 4];
+            for (long done = 0; done < count; )
+            {
+                int n = (int)Math.Min(count - done, 65536);
+                Array.Clear(buf, 0, n * 4);
+                // the part of these samples the clip holds, in at most two pieces (the ring wraps)
+                long a = Math.Max(info.AudioStart + done, info.AudioFirst);
+                long b = Math.Min(info.AudioStart + done + n, info.AudioEnd);
+                while (a < b)
+                {
+                    long pos = a % info.AudioCapacity;
+                    long k = Math.Min(b - a, info.AudioCapacity - pos);
+                    fs.Seek(info.AudioOffset + pos * 4, SeekOrigin.Begin);
+                    ReadAt(fs, buf, (int)(a - info.AudioStart - done) * 4, (int)k * 4);
+                    a += k;
+                }
+                o.Write(buf, 0, n * 4);
+                done += n;
+            }
+        }
+    }
+
+    static void ReadAt(Stream s, byte[] buf, int at, int len)
+    {
+        int got = 0;
+        while (got < len)
+        {
+            int n = s.Read(buf, at + got, len - got);
+            if (n <= 0) throw new Exception("the file ends early (was it copied completely?)");
+            got += n;
+        }
+    }
+
+    // Decodes a clip straight into ffmpeg, which writes the MP4 (with the
+    // clip's audio, from a temporary WAV file next to it).
     public static Info ToMp4(string path, string mp4)
     {
         Info info = Read(path, delegate(byte[] f, int c) { });   // validate everything before starting ffmpeg
 
+        string wav = info.HasAudio ? mp4 + ".audio.wav" : null;
+        string audioIn = "", audioOut = "";
+        if (wav != null)
+        {
+            WriteWav(path, info, wav);
+            audioIn = "-i \"" + wav + "\" -map 0:v -map 1:a ";
+            audioOut = "-c:a aac -b:a 192k -ar 48000 ";
+        }
+
         ProcessStartInfo psi = new ProcessStartInfo("ffmpeg", string.Format(
-            "-hide_banner -loglevel error -n -f rawvideo -pixel_format rgb565le -video_size {0}x{1} -framerate {2} -i - " +
-            "-vf \"scale=iw*2:ih*2:flags=neighbor\" -c:v libx264 -crf 12 -pix_fmt yuv420p \"{3}\"",
-            info.Width, info.Height, info.Fps, mp4));
+            "-hide_banner -loglevel error -n -f rawvideo -pixel_format rgb565le -video_size {0}x{1} -framerate {2} -i - {4}" +
+            "-vf \"scale=iw*2:ih*2:flags=neighbor\" -c:v libx264 -crf 12 -pix_fmt yuv420p {5}\"{3}\"",
+            info.Width, info.Height, info.Fps, mp4, audioIn, audioOut));
         psi.UseShellExecute = false;
         psi.RedirectStandardInput = true;
 
@@ -227,6 +329,8 @@ public static class FlashbackClip
             catch (IOException) { }     // ffmpeg stopped early; its exit code says why
             finally { try { stdin.Close(); } catch (IOException) { } }
             p.WaitForExit();
+            if (wav != null)
+                try { File.Delete(wav); } catch (Exception) { }
             if (p.ExitCode != 0)
             {
                 try { File.Delete(mp4); } catch (Exception) { }
@@ -295,7 +399,8 @@ foreach ($f in $files) {
     try {
         if ($ext -eq '.flb') {
             $info = [FlashbackClip]::ToMp4($f, $mp4)
-            Write-Host ("  Saved {0} ({1}x{2}, {3} fps, {4} frames)" -f $mp4Name, $info.Width, $info.Height, $info.Fps, $info.Frames)
+            Write-Host ("  Saved {0} ({1}x{2}, {3} fps, {4} frames{5})" -f $mp4Name, $info.Width, $info.Height, $info.Fps, $info.Frames,
+                        $(if ($info.HasAudio) { ", with audio" } else { "" }))
         } else {
             # Clips from older Flashback builds: raw frames, described by a .txt.
             $txt = [IO.Path]::ChangeExtension($f, '.txt')

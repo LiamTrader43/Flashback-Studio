@@ -9,7 +9,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 | Tool | Status | What it does |
 |---|---|---|
 | `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
-| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, and compacts them to about half their size (trimming and exporting are planned) |
+| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself (picture only, for now), and compacts them to about half their size (trimming and exporting are planned) |
 
 ## Converting clips to MP4 (Windows)
 
@@ -26,7 +26,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
    * **drag** one or more clips onto `convert_flashback.bat`, or
    * put `convert_flashback.bat` in the folder with your clips and **double-click** it to convert all of them.
 
-Each clip becomes an MP4 next to it (`clip_<date>.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at. It plays in any video player and imports into video editors like DaVinci Resolve.
+Each clip becomes an MP4 next to it (`clip_<date>.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
 
 Clips that already have an MP4 are skipped, so it's safe to run again on the same folder. Clips compacted by the 3DS app, and clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it), convert the same way.
 
@@ -54,7 +54,7 @@ Flashback Studio is a homebrew app that lists the clips on your SD card and play
 
 ### Using it
 
-The bottom screen lists the clips in `/luma/flashback/`, newest first, with their length and size. The selected clip's first frame shows on the top screen, and its resolution, frame rate and number of missed frames below the list. Half resolution clips are shown at twice their size, so they fill the screen.
+The bottom screen lists the clips in `/luma/flashback/`, newest first, with their length and size. The selected clip's first frame shows on the top screen, and its resolution, frame rate, whether it has sound, and number of missed frames below the list. (The player doesn't play the sound yet: convert the clip to hear it.) Half resolution clips are shown at twice their size, so they fill the screen.
 
 | Clip list | |
 |---|---|
@@ -87,7 +87,7 @@ Select a clip and press R. The details under the list show how big it will be. C
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
-* **Compacted clips** play in the app and convert with `convert_flashback.bat` like any other clip. Use the latest `convert_flashback.bat`: older copies don't know compacted clips.
+* **Compacted clips** play in the app and convert with `convert_flashback.bat` like any other clip, sound included (only the sound the clip's frames last is kept). Use the latest `convert_flashback.bat`: older copies don't know compacted clips.
 
 ### Building it
 
@@ -105,7 +105,7 @@ A `.flb` file saved by Flashback (version 1) is its recording buffer saved as-is
 
 Version 1 is documented next to `flashbackSaveClipFile` in [`sysmodules/rosalina/source/flashback.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback.c) of Luma3DS-Flashback, and the decoders in the converter and the 3DS app are direct ports of the recorder's code.
 
-A compacted clip (version 2) has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot. Both versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h).
+A compacted clip (version 2) has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot. A clip with audio (version 3, recorded or compacted) also holds the sound, stereo 16-bit at the 3DS's 32,728 Hz, and each frame's position in it. All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h).
 
 ## License
 

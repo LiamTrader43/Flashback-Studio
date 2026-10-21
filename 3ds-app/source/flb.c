@@ -6,6 +6,8 @@
 #define FLB_MAGIC           0x4B424C46  // "FLBK"
 #define FLB_VERSION_RECORDED 1
 #define FLB_VERSION_COMPACT  2
+#define FLB_VERSION_AUDIO    3
+#define FLB_AUDIO_INFO_SIZE  32
 
 // Frames are written to a compacted copy in batches of up to this many bytes:
 // every SD write has a fixed cost, so fewer, bigger writes are faster.
@@ -24,6 +26,26 @@ static void flbPut32(uint8_t *p, uint32_t v)
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t flbEntrySize(const FlbInfo *info)
+{
+    return info->version == FLB_VERSION_AUDIO ? 16 : 12;
+}
+
+static uint32_t flbAudioInfoSize(const FlbInfo *info)
+{
+    return info->version == FLB_VERSION_AUDIO ? FLB_AUDIO_INFO_SIZE : 0;
+}
+
+bool flbIsCompacted(const FlbInfo *info)
+{
+    return info->version == FLB_VERSION_COMPACT || (info->version == FLB_VERSION_AUDIO && info->slotStride == 0);
+}
+
+uint32_t flbAudioSamples(const FlbInfo *info)
+{
+    return (uint32_t)(((uint64_t)info->frameCount * info->audioRateMhz / info->fps + 500) / 1000);
 }
 
 // The same checks as convert_flashback.bat, with the same messages.
@@ -52,8 +74,9 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
         *error = "not a Flashback clip (or the copy is incomplete)";
         return false;
     }
+    memset(info, 0, sizeof(*info));
     info->version = flbU32(t + 4);
-    if (info->version != FLB_VERSION_RECORDED && info->version != FLB_VERSION_COMPACT)
+    if (info->version < FLB_VERSION_RECORDED || info->version > FLB_VERSION_AUDIO)
     {
         *error = "made by a newer Flashback version; get the latest Flashback Studio";
         return false;
@@ -73,10 +96,37 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
         info->slotBytes != info->width * info->height * 2 || info->fps == 0 || info->fps > 60 ||
         (info->version == FLB_VERSION_RECORDED && info->slotStride < info->slotBytes) ||
         info->entryCount > (uint32_t)length / 12 ||
-        (uint64_t)info->indexOffset + (uint64_t)info->entryCount * 12 + FLB_TRAILER_SIZE != info->fileSize)
+        (uint64_t)info->indexOffset + (uint64_t)info->entryCount * flbEntrySize(info) + flbAudioInfoSize(info) +
+            FLB_TRAILER_SIZE != info->fileSize)
     {
         *error = "the clip's header is damaged";
         return false;
+    }
+
+    if (info->version == FLB_VERSION_AUDIO)
+    {
+        uint8_t a[FLB_AUDIO_INFO_SIZE];
+        if (fseek(file, (long)(info->indexOffset + info->entryCount * 16), SEEK_SET) != 0 ||
+            fread(a, 1, sizeof(a), file) != sizeof(a))
+        {
+            *error = "the file couldn't be read";
+            return false;
+        }
+        info->hasAudio = true;
+        info->audioRateMhz = flbU32(a);
+        info->audioOffset = flbU32(a + 8);
+        info->audioCapacity = flbU32(a + 12);
+        info->audioFirst = flbU32(a + 16);
+        info->audioEnd = flbU32(a + 20);
+        info->audioMissed = flbU32(a + 24);
+        uint32_t channels = a[4] | (a[5] << 8), bits = a[6] | (a[7] << 8);
+        if (channels != 2 || bits != 16 || info->audioRateMhz < 8000000 || info->audioRateMhz > 96000000 ||
+            info->audioCapacity == 0 || (uint64_t)info->audioOffset + (uint64_t)info->audioCapacity * 4 > info->indexOffset ||
+            info->audioFirst > info->audioEnd || info->audioEnd - info->audioFirst > info->audioCapacity)
+        {
+            *error = "the clip's audio header is damaged";
+            return false;
+        }
     }
     return true;
 }
@@ -94,7 +144,8 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         goto fail;
 
     const FlbInfo *info = &clip->info;
-    uint8_t *index = malloc((size_t)info->entryCount * 12 + 1);
+    uint32_t entrySize = flbEntrySize(info);
+    uint8_t *index = malloc((size_t)info->entryCount * entrySize + 1);
     clip->entries = malloc((size_t)info->entryCount * sizeof(FlbEntry) + 1);
     clip->stored = malloc(info->slotBytes);
     if (index == NULL || clip->entries == NULL || clip->stored == NULL)
@@ -104,7 +155,7 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         goto fail;
     }
     if (fseek(clip->file, info->indexOffset, SEEK_SET) != 0 ||
-        fread(index, 12, info->entryCount, clip->file) != info->entryCount)
+        fread(index, entrySize, info->entryCount, clip->file) != info->entryCount)
     {
         free(index);
         *error = "the file couldn't be read";
@@ -115,10 +166,12 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
     for (uint32_t e = 0; e < info->entryCount; e++)
     {
         FlbEntry *entry = &clip->entries[e];
-        uint32_t where = flbU32(index + e * 12);    // version 1: ring slot, version 2: offset
+        const uint8_t *p = index + e * entrySize;
+        uint32_t where = flbU32(p);     // version 1: ring slot, versions 2 and 3: offset
         uint64_t offset = info->version == FLB_VERSION_RECORDED ? (uint64_t)where * info->slotStride : where;
-        entry->size = flbU32(index + e * 12 + 4);
-        entry->copies = flbU32(index + e * 12 + 8);
+        entry->size = flbU32(p + 4);
+        entry->copies = flbU32(p + 8);
+        entry->audioPos = info->hasAudio ? flbU32(p + 12) : 0;
         entry->firstFrame = frames;
         if (entry->size == 0 || entry->size > info->slotBytes || entry->copies == 0 ||
             entry->copies > info->frameCount - frames || offset + entry->size > info->indexOffset)
@@ -189,11 +242,39 @@ bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **e
     return true;
 }
 
+bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, const char **error)
+{
+    const FlbInfo *info = &clip->info;
+    memset(dst, 0, (size_t)count * 4);
+    if (!info->hasAudio)
+        return true;
+
+    // The part of these samples the clip holds, in at most two pieces (a ring wraps).
+    uint64_t a = first > info->audioFirst ? first : info->audioFirst;
+    uint64_t b = (uint64_t)first + count < info->audioEnd ? (uint64_t)first + count : info->audioEnd;
+    while (a < b)
+    {
+        uint32_t pos = (uint32_t)(a % info->audioCapacity);
+        uint32_t n = (uint32_t)(b - a < info->audioCapacity - pos ? b - a : info->audioCapacity - pos);
+        if (fseek(clip->file, (long)(info->audioOffset + (uint64_t)pos * 4), SEEK_SET) != 0 ||
+            fread(dst + (a - first) * 2, 4, n, clip->file) != n)
+        {
+            *error = "the clip's audio couldn't be read";
+            return false;
+        }
+        a += n;
+    }
+    return true;
+}
+
 uint64_t flbCompactSize(const FlbClip *clip)
 {
-    uint64_t size = (uint64_t)clip->info.entryCount * 12 + FLB_TRAILER_SIZE;
-    for (uint32_t e = 0; e < clip->info.entryCount; e++)
+    const FlbInfo *info = &clip->info;
+    uint64_t size = (uint64_t)info->entryCount * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE;
+    for (uint32_t e = 0; e < info->entryCount; e++)
         size += clip->entries[e].size;
+    if (info->hasAudio)
+        size += (uint64_t)flbAudioSamples(info) * 4;
     return size;
 }
 
@@ -228,14 +309,22 @@ bool flbCompactBegin(FlbCompactor *c, const char *path, const char **error)
 
     if (!flbOpen(&c->clip, path, error))
         return false;
-    if (c->clip.info.version != FLB_VERSION_RECORDED)
+    const FlbInfo *info = &c->clip.info;
+    if (flbIsCompacted(info))
     {
         flbClose(&c->clip);
         *error = "this clip is already compacted";
         return false;
     }
 
-    c->total = flbCompactSize(&c->clip) - (uint64_t)c->clip.info.entryCount * 12 - FLB_TRAILER_SIZE;
+    // Just the audio the clip's frames last, from the first one on.
+    if (info->hasAudio)
+    {
+        c->audioStart = c->clip.entries[0].audioPos;
+        c->audioCount = flbAudioSamples(info);
+    }
+    c->total = flbCompactSize(&c->clip) - (uint64_t)info->entryCount * flbEntrySize(info) -
+               flbAudioInfoSize(info) - FLB_TRAILER_SIZE;
     c->buf = malloc(FLB_COMPACT_BUFFER);
     c->offsets = malloc((size_t)c->clip.info.entryCount * sizeof(uint32_t));
     if (c->buf == NULL || c->offsets == NULL)
@@ -262,13 +351,14 @@ static bool flbCompactFlush(FlbCompactor *c)
     return ok;
 }
 
-// Writes the index and trailer, then swaps the copy in for the clip: the clip
-// is renamed out of the way first, so there's always a whole clip on the SD
-// card (see flbCleanUpLeftover).
+// Writes the index (audio info) and trailer, then swaps the copy in for the
+// clip: the clip is renamed out of the way first, so there's always a whole
+// clip on the SD card (see flbCleanUpLeftover).
 static bool flbCompactFinish(FlbCompactor *c, const char **error)
 {
     const FlbInfo *info = &c->clip.info;
-    uint32_t indexSize = info->entryCount * 12;
+    uint32_t entrySize = flbEntrySize(info);
+    uint32_t indexSize = info->entryCount * entrySize + flbAudioInfoSize(info);
     uint8_t *index = malloc(indexSize + FLB_TRAILER_SIZE);
     if (index == NULL)
     {
@@ -277,14 +367,31 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     }
     for (uint32_t e = 0; e < info->entryCount; e++)
     {
-        flbPut32(index + e * 12, c->offsets[e]);
-        flbPut32(index + e * 12 + 4, c->clip.entries[e].size);
-        flbPut32(index + e * 12 + 8, c->clip.entries[e].copies);
+        const FlbEntry *entry = &c->clip.entries[e];
+        uint8_t *p = index + e * entrySize;
+        flbPut32(p, c->offsets[e]);
+        flbPut32(p + 4, entry->size);
+        flbPut32(p + 8, entry->copies);
+        if (info->hasAudio)     // (the copy's audio starts at the first frame)
+            flbPut32(p + 12, entry->audioPos > c->audioStart ? entry->audioPos - c->audioStart : 0);
+    }
+    if (info->hasAudio)
+    {
+        uint8_t *a = index + info->entryCount * entrySize;
+        memset(a, 0, FLB_AUDIO_INFO_SIZE);
+        flbPut32(a, info->audioRateMhz);
+        a[4] = 2;       // channels
+        a[6] = 16;      // bits per sample
+        flbPut32(a + 8, c->audioOffset);
+        flbPut32(a + 12, c->audioCount);
+        flbPut32(a + 16, 0);
+        flbPut32(a + 20, c->audioCount);
+        flbPut32(a + 24, info->audioMissed);
     }
     uint8_t *t = index + indexSize;
     memset(t, 0, FLB_TRAILER_SIZE);
     flbPut32(t, FLB_MAGIC);
-    flbPut32(t + 4, FLB_VERSION_COMPACT);
+    flbPut32(t + 4, info->hasAudio ? FLB_VERSION_AUDIO : FLB_VERSION_COMPACT);
     flbPut32(t + 8, info->width);
     flbPut32(t + 12, info->height);
     flbPut32(t + 16, info->fps);
@@ -356,6 +463,28 @@ int flbCompactStep(FlbCompactor *c, const char **error)
         c->offsets[c->next++] = (uint32_t)c->copied;
         c->bufLen += e->size;
         c->copied += e->size;
+        return 0;
+    }
+
+    if (c->audioDone < c->audioCount)
+    {
+        if (c->audioDone == 0)
+            c->audioOffset = (uint32_t)c->copied;
+        if (c->bufLen + 4 > FLB_COMPACT_BUFFER && !flbCompactFlush(c))
+        {
+            *error = "the compacted copy couldn't be written (is the SD card full?)";
+            goto fail;
+        }
+        uint32_t n = (FLB_COMPACT_BUFFER - c->bufLen) / 4;
+        if (n > 32768)
+            n = 32768;
+        if (n > c->audioCount - c->audioDone)
+            n = c->audioCount - c->audioDone;
+        if (!flbReadAudio(&c->clip, c->audioStart + c->audioDone, n, (int16_t *)(c->buf + c->bufLen), error))
+            goto fail;
+        c->bufLen += n * 4;
+        c->copied += n * 4;
+        c->audioDone += n;
         return 0;
     }
 
