@@ -380,7 +380,8 @@ typedef struct ListState {
     bool confirmDelete;
     bool confirmCompact;
     bool compacting;        // g_compactor is at work on the selected clip
-    u64 compactFrom;        // the clip's size before
+    u64 compactFrom;        // the clip's size before...
+    u64 compactStart;       // ...and when compacting started (system ticks)
     const char *message;    // shown in the details area until the selection changes
     bool messageOk;         // (rather than an error)
     int previewFor;         // clip shown on the top screen, or -1
@@ -1069,7 +1070,8 @@ int main(void)
                         char from[16], to[16];
                         formatSize(ls.compactFrom, from, sizeof(from));
                         formatSize(g_clips[ls.selected].info.fileSize, to, sizeof(to));
-                        snprintf(g_messageText, sizeof(g_messageText), "Compacted: %s -> %s.", from, to);
+                        unsigned long secs = (unsigned long)((svcGetSystemTick() - ls.compactStart) / SYSCLOCK_ARM11);
+                        snprintf(g_messageText, sizeof(g_messageText), "Compacted: %s -> %s in %lu s.", from, to, secs);
                         setMessage(&ls, g_messageText, true);
                     }
                     else
@@ -1100,6 +1102,7 @@ int main(void)
                 {
                     ls.compacting = true;
                     ls.compactFrom = c->info.fileSize;
+                    ls.compactStart = svcGetSystemTick();
                     setMessage(&ls, NULL, false);
                 }
                 else

@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define FLB_MAGIC           0x4B424C46  // "FLBK"
 #define FLB_VERSION_RECORDED 1
@@ -9,8 +10,9 @@
 #define FLB_VERSION_AUDIO    3
 #define FLB_AUDIO_INFO_SIZE  32
 
-// Frames are written to a compacted copy in batches of up to this many bytes:
-// every SD write has a fixed cost, so fewer, bigger writes are faster.
+// A compacted copy is written in blocks of this many bytes, each at a multiple
+// of it in the file (the last one is shorter): every SD write has a fixed cost,
+// so fewer, bigger, aligned writes are faster.
 #define FLB_COMPACT_BUFFER  (512 * 1024)
 
 static char g_error[96];
@@ -140,6 +142,9 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         *error = "the file couldn't be opened";
         return false;
     }
+    // Reads are whole frames or long runs of audio: unbuffered, each is one
+    // read of the SD card, rather than one per KB through stdio's small buffer.
+    setvbuf(clip->file, NULL, _IONBF, 0);
     if (!flbReadInfo(clip->file, &clip->info, error))
         goto fail;
 
@@ -340,7 +345,15 @@ bool flbCompactBegin(FlbCompactor *c, const char *path, const char **error)
         *error = "the compacted copy couldn't be created";
         return false;
     }
-    setvbuf(c->out, NULL, _IONBF, 0);   // (it's written in big batches already)
+    setvbuf(c->out, NULL, _IONBF, 0);   // (it's written in whole blocks already)
+    // The copy at its full size up front: its SD space is claimed once,
+    // instead of the file growing with every block.
+    if (ftruncate(fileno(c->out), (off_t)flbCompactSize(&c->clip)) != 0)
+    {
+        flbCompactCancel(c);
+        *error = "the compacted copy couldn't be created (is the SD card full?)";
+        return false;
+    }
     return true;
 }
 
@@ -349,6 +362,24 @@ static bool flbCompactFlush(FlbCompactor *c)
     bool ok = c->bufLen == 0 || fwrite(c->buf, 1, c->bufLen, c->out) == c->bufLen;
     c->bufLen = 0;
     return ok;
+}
+
+// Adds 'len' bytes to the copy, writing each block out once it's full.
+static bool flbCompactPut(FlbCompactor *c, const uint8_t *src, uint32_t len)
+{
+    while (len > 0)
+    {
+        uint32_t n = FLB_COMPACT_BUFFER - c->bufLen;
+        if (n > len)
+            n = len;
+        memcpy(c->buf + c->bufLen, src, n);
+        c->bufLen += n;
+        src += n;
+        len -= n;
+        if (c->bufLen == FLB_COMPACT_BUFFER && !flbCompactFlush(c))
+            return false;
+    }
+    return true;
 }
 
 // Writes the index (audio info) and trailer, then swaps the copy in for the
@@ -401,7 +432,7 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     flbPut32(t + 32, info->frameCount);
     flbPut32(t + 36, (uint32_t)c->copied);
 
-    bool ok = fwrite(index, 1, indexSize + FLB_TRAILER_SIZE, c->out) == indexSize + FLB_TRAILER_SIZE;
+    bool ok = flbCompactPut(c, index, indexSize + FLB_TRAILER_SIZE) && flbCompactFlush(c);
     free(index);
     ok = fclose(c->out) == 0 && ok;
     c->out = NULL;
@@ -448,20 +479,20 @@ int flbCompactStep(FlbCompactor *c, const char **error)
 
     if (c->next < info->entryCount)
     {
+        // (Read into the clip's frame buffer: a frame can straddle two blocks.)
         const FlbEntry *e = &c->clip.entries[c->next];
-        if (c->bufLen + e->size > FLB_COMPACT_BUFFER && !flbCompactFlush(c))
-        {
-            *error = "the compacted copy couldn't be written (is the SD card full?)";
-            goto fail;
-        }
         if (fseek(c->clip.file, (long)e->offset, SEEK_SET) != 0 ||
-            fread(c->buf + c->bufLen, 1, e->size, c->clip.file) != e->size)
+            fread(c->clip.stored, 1, e->size, c->clip.file) != e->size)
         {
             *error = "the clip couldn't be read";
             goto fail;
         }
+        if (!flbCompactPut(c, c->clip.stored, e->size))
+        {
+            *error = "the compacted copy couldn't be written (is the SD card full?)";
+            goto fail;
+        }
         c->offsets[c->next++] = (uint32_t)c->copied;
-        c->bufLen += e->size;
         c->copied += e->size;
         return 0;
     }
@@ -470,29 +501,21 @@ int flbCompactStep(FlbCompactor *c, const char **error)
     {
         if (c->audioDone == 0)
             c->audioOffset = (uint32_t)c->copied;
-        if (c->bufLen + 4 > FLB_COMPACT_BUFFER && !flbCompactFlush(c))
+        uint32_t n = info->slotBytes / 4;   // (through the frame buffer too)
+        if (n > c->audioCount - c->audioDone)
+            n = c->audioCount - c->audioDone;
+        if (!flbReadAudio(&c->clip, c->audioStart + c->audioDone, n, (int16_t *)c->clip.stored, error))
+            goto fail;
+        if (!flbCompactPut(c, c->clip.stored, n * 4))
         {
             *error = "the compacted copy couldn't be written (is the SD card full?)";
             goto fail;
         }
-        uint32_t n = (FLB_COMPACT_BUFFER - c->bufLen) / 4;
-        if (n > 32768)
-            n = 32768;
-        if (n > c->audioCount - c->audioDone)
-            n = c->audioCount - c->audioDone;
-        if (!flbReadAudio(&c->clip, c->audioStart + c->audioDone, n, (int16_t *)(c->buf + c->bufLen), error))
-            goto fail;
-        c->bufLen += n * 4;
         c->copied += n * 4;
         c->audioDone += n;
         return 0;
     }
 
-    if (!flbCompactFlush(c))
-    {
-        *error = "the compacted copy couldn't be written (is the SD card full?)";
-        goto fail;
-    }
     if (!flbCompactFinish(c, error))
         goto fail;
     flbCompactFree(c);

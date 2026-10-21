@@ -118,7 +118,7 @@ typedef struct FlbCompactor {
     FILE *out;
     char path[256];         // the clip
     char tmpPath[264];      // the compacted copy, until it replaces the clip
-    uint8_t *buf;           // frames waiting to be written to the copy
+    uint8_t *buf;           // the block of the copy being filled
     uint32_t bufLen;
     uint32_t *offsets;      // each entry's offset in the copy
     uint32_t next;          // the next entry to copy
