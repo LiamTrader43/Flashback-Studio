@@ -55,7 +55,7 @@ using System.Text;
 // { u32 offset, u32 size, u32 copies, u32 audioPos } (audioPos: the audio
 // sample at which the frame is first shown), followed by 32 bytes of audio
 // info: { u32 sampleRate (mHz), u16 channels, u16 bits, u32 offset,
-// u32 capacity, u32 first, u32 end, u32 missed, u32 reserved }; stereo PCM16
+// u32 capacity, u32 first, u32 end, u32 missed, u32 full }; stereo PCM16
 // sample i is at offset + (i % capacity) * 4, and first .. end - 1 are held.
 public static class FlashbackClip
 {

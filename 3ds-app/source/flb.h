@@ -29,7 +29,7 @@
 //                 shown (each copy comes sampleRate / fps samples later)
 //   [audio info]  32 bytes: { u32 sampleRate (mHz), u16 channels (2), u16 bits
 //                 (16), u32 offset, u32 capacity, u32 first, u32 end, u32 missed,
-//                 u32 reserved }: sample i is at offset + (i % capacity) * 4, and
+//                 u32 full }: sample i is at offset + (i % capacity) * 4, and
 //                 samples first .. end - 1 are held
 //   [trailer]     as in version 1, with version 3 (slotStride 0 if compacted)
 //
