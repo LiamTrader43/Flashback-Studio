@@ -39,14 +39,17 @@ using System.IO;
 using System.Diagnostics;
 using System.Text;
 
-// Reader for Flashback clip files (.flb). The layout is documented next to
-// flashbackSaveClipFile in sysmodules/rosalina/source/flashback.c of
+// Reader for Flashback clip files (.flb). Version 1, as recorded, is documented
+// next to flashbackSaveClipFile in sysmodules/rosalina/source/flashback.c of
 // Luma3DS-Flashback (https://github.com/LiamTrader43/Luma3DS-Flashback):
 //   [ring slots]  slot i at offset i * slotStride: a compressed frame, or the
 //                 raw frame if its stored size is slotBytes
 //   [index]       entryCount x { u32 slot, u32 size, u32 copies }, oldest first
 //   [trailer]     the last 48 bytes: magic "FLBK", version, width, height, fps,
 //                 slotStride, slotBytes, entryCount, frameCount, indexOffset
+// Version 2 is a clip compacted by the Flashback Studio 3DS app (see its
+// 3ds-app/source/flb.h): the frames back to back, and each index entry's first
+// field is the frame's offset in the file instead of its slot (slotStride is 0).
 public static class FlashbackClip
 {
     const uint Magic = 0x4B424C46;  // "FLBK"
@@ -137,14 +140,15 @@ public static class FlashbackClip
             fs.Seek(length - TrailerSize, SeekOrigin.Begin);
             ReadFully(fs, t, TrailerSize);
             if (U32(t, 0) != Magic) throw new Exception("not a Flashback clip (or the copy is incomplete)");
-            if (U32(t, 4) != 1) throw new Exception("made by a newer Flashback version; get the latest convert_flashback.bat");
+            uint version = U32(t, 4);
+            if (version != 1 && version != 2) throw new Exception("made by a newer Flashback version; get the latest convert_flashback.bat");
 
             int width = (int)U32(t, 8), height = (int)U32(t, 12), fps = (int)U32(t, 16);
             long stride = U32(t, 20);
             int slotBytes = (int)U32(t, 24), entries = (int)U32(t, 28), frames = (int)U32(t, 32);
             long indexOffset = U32(t, 36);
             if (width <= 0 || height <= 0 || width > 800 || height > 480 || slotBytes != width * height * 2 ||
-                fps <= 0 || fps > 60 || stride < slotBytes || entries < 0 ||
+                fps <= 0 || fps > 60 || (version == 1 && stride < slotBytes) || entries < 0 ||
                 indexOffset + (long)entries * 12 + TrailerSize != length)
                 throw new Exception("the clip's header is damaged");
 
@@ -160,13 +164,14 @@ public static class FlashbackClip
 
             for (int e = 0; e < entries; e++)
             {
-                long slot = U32(idx, e * 12);
+                long where = U32(idx, e * 12);     // version 1: ring slot, version 2: offset
+                long offset = version == 1 ? where * stride : where;
                 int size = (int)U32(idx, e * 12 + 4);
                 int copies = (int)U32(idx, e * 12 + 8);
-                if (size <= 0 || size > slotBytes || copies <= 0 || slot * stride + size > indexOffset)
+                if (size <= 0 || size > slotBytes || copies <= 0 || offset + size > indexOffset)
                     throw new Exception(string.Format("frame entry {0} is damaged", e));
 
-                fs.Seek(slot * stride, SeekOrigin.Begin);
+                fs.Seek(offset, SeekOrigin.Begin);
                 ReadFully(fs, stored, size);
                 if (size == slotBytes)
                     Buffer.BlockCopy(stored, 0, frame, 0, slotBytes);
