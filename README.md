@@ -9,7 +9,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 | Tool | Status | What it does |
 |---|---|---|
 | `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
-| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, trims them, and compacts them to about half their size (exporting is planned) |
+| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, and trims, renames and compacts them (to about half their size) |
 
 ## Converting clips to MP4 (Windows)
 

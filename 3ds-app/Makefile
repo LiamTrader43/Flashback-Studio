@@ -40,7 +40,7 @@ GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 #ROMFS		:=	romfs
 APP_TITLE	:=	Flashback Studio
-APP_DESCRIPTION	:=	View Luma3DS-Flashback clips
+APP_DESCRIPTION	:=	Play, trim, rename and compact Luma3DS-Flashback clips
 APP_AUTHOR	:=	LiamTrader
 #GFXBUILD	:=	$(ROMFS)/gfx
 
