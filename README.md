@@ -84,6 +84,8 @@ Red marks under the progress bar show where the recorder missed frames (they're 
 
 Clips recorded with audio play their sound at normal speed. It's muted while paused, while stepping through frames, while you touch the bar, and at the other speeds. The player shows which, below the time. The sound needs the DSP firmware dump `/3ds/dspfirm.cdc` on the SD card, like every homebrew app with sound. If you've used one before, you have it; otherwise make it with [DSP1](https://github.com/zoogie/DSP1). Without it, clips play silently.
 
+**If playback stutters,** check that Flashback recording is off (Rosalina menu > Flashback recorder). While it's on, it records the app too, and its SD card writes compete with the app reading the clip. X shows how long each frame takes to read and draw.
+
 ### Trimming clips
 
 Trimming saves part of a clip as a new clip, with its sound; the original is kept. Press SELECT in the clip list (or while a clip plays), find where the part you want starts and press L, then where it ends and press R. The part that will be cut off is darkened on the bar, and the selection plays (and loops) on its own so you can check it. Press X to save it.
