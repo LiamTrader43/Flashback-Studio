@@ -9,7 +9,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 | Tool | Status | What it does |
 |---|---|---|
 | `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
-| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, and compacts them to about half their size (trimming and exporting are planned) |
+| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, trims them, and compacts them to about half their size (exporting is planned) |
 
 ## Converting clips to MP4 (Windows)
 
@@ -64,6 +64,7 @@ The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first:
 | X | Delete the clip (asks first) |
 | R | Compact the clip (asks first; see below) |
 | L | Rename the clip, with the 3DS keyboard (spaces become dashes; names a file can't have, or Windows can't copy, are refused) |
+| SELECT | Trim the clip (see below) |
 | Y | Refresh the list |
 | START | Exit |
 
@@ -76,11 +77,29 @@ The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first:
 | Y | Loop on/off |
 | X | Show/hide timing (how long each frame takes to read and draw, and how close the sound is to the picture) |
 | Touch the bar | Jump to that point |
+| SELECT | Trim (see below) |
 | B | Back to the clip list |
 
 Red marks under the progress bar show where the recorder missed frames (they're filled with copies of the frame before, so the clip plays at the right speed). On a missed frame, the player says so.
 
 Clips recorded with audio play their sound at normal speed. It's muted while paused, while stepping through frames, while you touch the bar, and at the other speeds. The player shows which, below the time. The sound needs the DSP firmware dump `/3ds/dspfirm.cdc` on the SD card, like every homebrew app with sound. If you've used one before, you have it; otherwise make it with [DSP1](https://github.com/zoogie/DSP1). Without it, clips play silently.
+
+### Trimming clips
+
+Trimming saves part of a clip as a new clip, with its sound; the original is kept. Press SELECT in the clip list (or while a clip plays), find where the part you want starts and press L, then where it ends and press R. The part that will be cut off is darkened on the bar, and the selection plays (and loops) on its own so you can check it. Press X to save it.
+
+| Trimming | |
+|---|---|
+| L / R | Start / end the selection at this frame |
+| A | Play/pause the selection |
+| Left/Right | Previous/next frame |
+| Up/Down | Forward/back 1 second |
+| X | Save the selection as a new clip (asks first) |
+| Y | Loop on/off |
+| Touch the bar | Jump to that point |
+| B or SELECT | Stop trimming |
+
+The new clip is saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), already compacted, and selected in the list when it's done. Like compacting, it needs free space for the new clip, B cancels it, and nothing is left behind if it fails.
 
 ### Compacting clips
 

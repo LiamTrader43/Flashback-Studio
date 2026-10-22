@@ -64,6 +64,8 @@
 #define COLOR_TILE      ((u16)(RGB8_to_565(60, 60, 60)))     // a thumbnail's frame
 #define COLOR_LOADING   ((u16)(RGB8_to_565(25, 25, 25)))     // a thumbnail not read yet...
 #define COLOR_DAMAGED   ((u16)(RGB8_to_565(110, 20, 20)))    // ...or that can't be
+#define COLOR_CUT       ((u16)(RGB8_to_565(20, 20, 20)))     // trimming: the bar outside the selection...
+#define COLOR_MARK      ((u16)(RGB8_to_565(255, 200, 0)))    // ...and its start and end
 
 // Console colors
 #define C_NORMAL    "\x1b[0m"
@@ -90,6 +92,7 @@ static const char *const kSpeedNames[] = { "1/4x", "1/2x", "1x", "2x" };
 
 typedef struct Player {
     FlbClip clip;
+    char fileName[96];      // the clip's
     char title[48];
     u32 frame;              // clip frame on screen (copies counted)
     u32 shownEntry;         // index entry on screen, or UINT32_MAX
@@ -100,8 +103,17 @@ typedef struct Player {
     u8 missed[BAR_W];       // bar pixels covering missed (copied) frames
     const char *error;
     bool showStats;
-    u32 decodeUs, drawUs;   // last frame's read + decode, and drawing, times
+    u32 decodeUs, drawUs;   // last frame's read + decode, and drawing, times...
+    u32 textUs;             // ...and the bottom screen's
     u32 skipped;            // stored frames passed over without being shown
+
+    // Trimming: frames trimIn .. trimOut are the selection, which plays (and
+    // loops) on its own and can be saved as a new clip.
+    bool trimMode;
+    bool trimConfirm;       // asking whether to save it
+    bool trimSave;          // it's to be saved: the clip list does that once the player closes
+    u32 trimIn, trimOut;
+    const char *trimMessage;
 
     // Audio: streamed from the clip through AUDIO_BUFS NDSP wave buffers.
     bool scrubbing;         // the bar is being touched (no sound meanwhile)
@@ -130,7 +142,7 @@ static Player g_player;
 static bool g_ndsp;                 // NDSP started (else: no sound)
 static s16 *g_audioMem;             // the wave buffers' samples (linear memory, for the DSP)
 static FlbCompactor g_compactor;
-static char g_messageText[96];
+static char g_messageText[128];
 
 // ---------------------------------------------------------------------------
 // Bottom screen text
@@ -486,9 +498,11 @@ typedef struct ListState {
     int selected, scroll;
     bool confirmDelete;
     bool confirmCompact;
-    bool compacting;        // g_compactor is at work on the selected clip
+    bool compacting;        // g_compactor is at work: compacting the selected clip, or trimming it...
+    bool trimming;          // ...into a new clip
+    char jobClip[96];       // the clip being written (the selected one, or the trimmed copy)
     u64 compactFrom;        // the clip's size before...
-    u64 compactStart;       // ...and when compacting started (system ticks)
+    u64 compactStart;       // ...and when the work started (system ticks)
     const char *message;    // shown in the details area until the selection changes
     bool messageOk;         // (rather than an error)
     int previewFor;         // clip shown on the top screen, or -1
@@ -501,13 +515,13 @@ static void setMessage(ListState *ls, const char *message, bool ok)
     ls->messageOk = ok;
 }
 
-// The compaction's progress, in the details area.
+// The compaction's (or trim's) progress, in the details area.
 static void drawCompacting(const ListState *ls)
 {
     char copied[16], total[16];
     u32 pct = g_compactor.total ? (u32)(g_compactor.copied * 100 / g_compactor.total) : 100;
-    row(20, C_INFO, "Compacting...");
-    row(21, C_NORMAL, "%s", g_clips[ls->selected].name);
+    row(20, C_INFO, ls->trimming ? "Trimming..." : "Compacting...");
+    row(21, C_NORMAL, "%s", ls->jobClip);
     row(22, C_NORMAL, "[%-30.*s] %3lu%%", (int)(pct * 30 / 100), "##############################", pct);
     formatSize(g_compactor.copied, copied, sizeof(copied));
     formatSize(g_compactor.total, total, sizeof(total));
@@ -706,7 +720,7 @@ static void drawList(const ListState *ls)
     {
         row(27, C_NORMAL, g_clipCount ? " A Play  X Delete  R Compact  Y Refresh" : " Y Refresh");
         row(28, C_NORMAL, g_clipCount ? " D-Pad/touch Select   Touch again Play" : "");
-        row(29, C_NORMAL, g_clipCount ? " L Rename   START Exit" : " START Exit");
+        row(29, C_NORMAL, g_clipCount ? " L Rename  SELECT Trim  START Exit" : " START Exit");
     }
 }
 
@@ -893,6 +907,62 @@ static void renameClip(ListState *ls)
     setMessage(ls, g_messageText, true);
 }
 
+// A free name for a trimmed copy of clip 'name': "<name>-trim.flb", or
+// "<name>-trim2.flb" and so on if that's taken. False if none is free.
+static bool trimmedName(const char *name, char *out, size_t size)
+{
+    int base = (int)strlen(name) - 4;   // without ".flb"
+    if (base > 80)
+        base = 80;
+    for (int n = 1; n < 100; n++)
+    {
+        char path[160];
+        struct stat st;
+        if (n == 1)
+            snprintf(out, size, "%.*s-trim.flb", base, name);
+        else
+            snprintf(out, size, "%.*s-trim%d.flb", base, name, n);
+        snprintf(path, sizeof(path), CLIP_DIR "%s", out);
+        if (stat(path, &st) != 0)
+            return true;
+    }
+    return false;
+}
+
+// Starts saving frames first .. first + frames - 1 of clip 'source' (taking
+// 'bytes') as a new clip next to it; the clip list shows the progress.
+static void startTrim(ListState *ls, const char *source, u32 first, u32 frames, u64 bytes)
+{
+    char name[sizeof(g_clips[0].name)], from[160], to[160];
+    const char *error;
+    if (!trimmedName(source, name, sizeof(name)))
+    {
+        setMessage(ls, "There's no free name for the trimmed clip.", false);
+        return;
+    }
+    u64 needed = bytes + 1000000;
+    if (sdFreeBytes() < needed)
+    {
+        char size[16];
+        formatSize(needed, size, sizeof(size));
+        snprintf(g_messageText, sizeof(g_messageText), "Not enough free space: trimming needs %s free.", size);
+        setMessage(ls, g_messageText, false);
+        return;
+    }
+    snprintf(from, sizeof(from), CLIP_DIR "%s", source);
+    snprintf(to, sizeof(to), CLIP_DIR "%s", name);
+    if (!flbTrimBegin(&g_compactor, from, to, first, frames, &error))
+    {
+        setMessage(ls, error, false);
+        return;
+    }
+    ls->compacting = true;
+    ls->trimming = true;
+    snprintf(ls->jobClip, sizeof(ls->jobClip), "%s", name);
+    ls->compactStart = svcGetSystemTick();
+    setMessage(ls, NULL, false);
+}
+
 // ---------------------------------------------------------------------------
 // Player
 
@@ -1063,11 +1133,13 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
     if (!flbOpen(&p->clip, path, error))
         return false;
 
+    snprintf(p->fileName, sizeof(p->fileName), "%s", c->name);
     prettyName(c->name, p->title, sizeof(p->title));
     p->shownEntry = UINT32_MAX;
     p->speed = SPEED_NORMAL;
     p->playing = true;
     p->touchWait = true;
+    p->trimOut = p->clip.info.frameCount - 1;
 
     // The recorder keeps the DSP's own sample rate, so the sound plays as is.
     if (g_ndsp && p->clip.info.hasAudio)
@@ -1093,18 +1165,64 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
     return true;
 }
 
+// The bar pixel showing clip frame 'frame'.
+static u32 barPixel(const Player *p, u32 frame)
+{
+    u32 count = p->clip.info.frameCount;
+    return count > 1 ? (u32)((u64)frame * (BAR_W - 1) / (count - 1)) : 0;
+}
+
+// The player's bottom screen is redrawn every frame, but only what changed is
+// drawn again: the console draws text pixel by pixel, which is slow enough to
+// make playback stutter if every row is reprinted each time. What's shown on
+// each row (its color and text, or "\x01" if unknown), and the bar's state:
+static char g_playerRows[30][160];
+static u32 g_barShown;
+
+// Forgets what the player's rows and bar show (after the screen was cleared).
+static void playerScreenForget(void)
+{
+    for (int r = 0; r < 30; r++)
+        strcpy(g_playerRows[r], "\x01");
+    g_barShown = UINT32_MAX;
+}
+
+// Like row(), but only prints the row if it changed.
+static void playerRow(int r, const char *color, const char *fmt, ...)
+{
+    char text[128], shown[sizeof(g_playerRows[0])];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof(text), fmt, ap);
+    va_end(ap);
+
+    snprintf(shown, sizeof(shown), "%s%s", color, text);
+    if (strcmp(shown, g_playerRows[r]) == 0)
+        return;
+    strcpy(g_playerRows[r], shown);
+    row(r, color, "%s", text);
+}
+
+// The progress bar. While trimming, the parts outside the selection are dark
+// and its start and end are marked.
 static void drawBar(const Player *p)
 {
     u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
-    u32 count = p->clip.info.frameCount;
-    u32 head = count > 1 ? (u32)((u64)p->frame * (BAR_W - 1) / (count - 1)) : 0;
+    u32 head = barPixel(p, p->frame), in = barPixel(p, p->trimIn), out = barPixel(p, p->trimOut);
+    u32 shown = head | in << 9 | out << 18 | (u32)p->trimMode << 27;   // (each under BAR_W, 300)
+    if (shown == g_barShown)
+        return;
+    g_barShown = shown;
 
     for (u32 i = 0; i < BAR_W; i++)
     {
         u16 *col = fb + (BAR_X + i) * 240;
         bool isHead = i + 1 >= head && i <= head + 1;
-        u16 color = isHead ? COLOR_HEAD : i <= head ? COLOR_PLAYED : COLOR_REST;
-        u32 y0 = isHead ? BAR_Y - 3 : BAR_Y, y1 = isHead ? BAR_Y + BAR_H + 3 : BAR_Y + BAR_H;
+        bool isMark = p->trimMode && (i == in || i == in + 1 || i + 1 == out || i == out);
+        u16 color = isHead ? COLOR_HEAD : isMark ? COLOR_MARK : p->trimMode && (i < in || i > out) ? COLOR_CUT :
+                    i <= head ? COLOR_PLAYED : COLOR_REST;
+        bool tall = isHead || isMark;
+        u32 y0 = tall ? BAR_Y - 3 : BAR_Y, y1 = tall ? BAR_Y + BAR_H + 3 : BAR_Y + BAR_H;
         for (u32 y = BAR_Y - 3; y < BAR_Y + BAR_H + 3; y++)
             col[239 - y] = (y >= y0 && y < y1) ? color : 0;
         u16 tick = p->missed[i] ? COLOR_MISSED : 0;
@@ -1119,22 +1237,39 @@ static void drawPlayerStatic(const Player *p)
     char text[96];
 
     consoleClear();
+    playerScreenForget();
     row(0, C_TITLE, " %s", p->title);
     formatResolution(&p->clip.info, text, sizeof(text));
     row(1, C_DIM, "%s", text);
 
     row(19, C_DIM, "----------------------------------------");
-    row(20, C_NORMAL, " A          Play / pause");
-    row(21, C_NORMAL, " Left/Right Previous / next frame");
-    row(22, C_NORMAL, " L/R        Back / forward 1 second");
-    row(23, C_NORMAL, " Up/Down    Speed");
-    row(24, C_NORMAL, " Y          Loop on/off");
-    row(25, C_NORMAL, " X          Show/hide timing");
-    row(26, C_NORMAL, " Touch the bar to jump");
-    row(27, C_NORMAL, " B          Back to the clip list");
+    if (p->trimMode)
+    {
+        row(20, C_NORMAL, " A          Play / pause the selection");
+        row(21, C_NORMAL, " Left/Right Previous / next frame");
+        row(22, C_NORMAL, " Up/Down    Forward / back 1 second");
+        row(23, C_NORMAL, " L/R        Start / end the selection here");
+        row(24, C_NORMAL, " X          Save it as a new clip");
+        row(25, C_NORMAL, " Y          Loop on/off");
+        row(26, C_NORMAL, " Touch the bar to jump");
+        row(27, C_NORMAL, " B/SELECT   Stop trimming");
+        row(28, C_NORMAL, "");
+    }
+    else
+    {
+        row(20, C_NORMAL, " A          Play / pause");
+        row(21, C_NORMAL, " Left/Right Previous / next frame");
+        row(22, C_NORMAL, " L/R        Back / forward 1 second");
+        row(23, C_NORMAL, " Up/Down    Speed");
+        row(24, C_NORMAL, " Y          Loop on/off");
+        row(25, C_NORMAL, " X          Show/hide timing");
+        row(26, C_NORMAL, " Touch the bar to jump");
+        row(27, C_NORMAL, " B          Back to the clip list");
+        row(28, C_NORMAL, " SELECT     Trim");
+    }
 }
 
-// The parts that change, redrawn every frame.
+// The parts that change, redrawn every frame (only where they did change).
 static void drawPlayer(const Player *p)
 {
     const FlbInfo *info = &p->clip.info;
@@ -1145,54 +1280,103 @@ static void drawPlayer(const Player *p)
     formatTime(p->frame, info->fps, now, sizeof(now));
     formatTime(info->frameCount, info->fps, total, sizeof(total));
     snprintf(text, sizeof(text), "%s / %s", now, total);
-    row(6, C_NORMAL, " %-20s Frame %lu/%lu", text, p->frame + 1, info->frameCount);
-    row(7, C_NORMAL, " %-8s %-6s Loop %s", p->playing ? "Playing" : "Paused", kSpeedNames[p->speed],
-        p->loop ? "on" : "off");
+    playerRow(6, C_NORMAL, " %-20s Frame %lu/%lu", text, p->frame + 1, info->frameCount);
+    playerRow(7, C_NORMAL, " %-8s %-6s Loop %s", p->playing ? "Playing" : "Paused", kSpeedNames[p->speed],
+              p->loop ? "on" : "off");
 
     const FlbEntry *entry = &p->clip.entries[p->shownEntry == UINT32_MAX ? 0 : p->shownEntry];
     if (p->shownEntry != UINT32_MAX && p->frame > entry->firstFrame)
-        row(8, C_WARN, " Missed frame (copy of the one before)");
+        playerRow(8, C_WARN, " Missed frame (copy of the one before)");
     else
-        row(8, C_NORMAL, "");
+        playerRow(8, C_NORMAL, "");
 
     if (!info->hasAudio)
-        row(9, C_DIM, " No sound (recorded without audio)");
+        playerRow(9, C_DIM, " No sound (recorded without audio)");
     else if (!g_ndsp)
-        row(9, C_WARN, " No sound: needs sd:/3ds/dspfirm.cdc");
+        playerRow(9, C_WARN, " No sound: needs sd:/3ds/dspfirm.cdc");
     else if (p->audioError != NULL)
-        row(9, C_WARN, " No sound: %s", p->audioError);
+        playerRow(9, C_WARN, " No sound: %s", p->audioError);
     else if (p->audioQueued)
-        row(9, C_NORMAL, " Sound on");
+        playerRow(9, C_NORMAL, " Sound on");
     else if (!p->playing)
-        row(9, C_DIM, " Sound: muted while paused");
+        playerRow(9, C_DIM, " Sound: muted while paused");
     else if (p->speed != SPEED_NORMAL)
-        row(9, C_DIM, " Sound: muted at %s speed", kSpeedNames[p->speed]);
+        playerRow(9, C_DIM, " Sound: muted at %s speed", kSpeedNames[p->speed]);
     else
-        row(9, C_DIM, " Sound: muted");
+        playerRow(9, C_DIM, " Sound: muted");
 
     if (p->error != NULL)
+    {
         wrapRows(10, 12, C_WARN, p->error);
+        for (int r = 10; r <= 12; r++)
+            strcpy(g_playerRows[r], "\x01");    // (printed without playerRow)
+    }
     else if (p->showStats)
     {
-        row(10, C_DIM, " Read + decode %lu.%lu ms, draw %lu.%lu ms", p->decodeUs / 1000, p->decodeUs / 100 % 10,
-            p->drawUs / 1000, p->drawUs / 100 % 10);
-        row(11, C_DIM, " Frames skipped to keep up: %lu", p->skipped);
+        playerRow(10, C_DIM, " Read+decode %lu.%lu  draw %lu.%lu  text %lu.%lu ms", p->decodeUs / 1000,
+                  p->decodeUs / 100 % 10, p->drawUs / 1000, p->drawUs / 100 % 10, p->textUs / 1000, p->textUs / 100 % 10);
+        playerRow(11, C_DIM, " Frames skipped to keep up: %lu", p->skipped);
         if (p->audioQueued)
-            row(12, C_DIM, " Sound vs picture: %+ld ms", p->audioOffsetMs);
+            playerRow(12, C_DIM, " Sound vs picture: %+ld ms", p->audioOffsetMs);
         else
-            row(12, C_NORMAL, "");
+            playerRow(12, C_NORMAL, "");
     }
     else
-        clearRows(10, 12);
+        for (int r = 10; r <= 12; r++)
+            playerRow(r, C_NORMAL, "");
+
+    if (p->trimMode)
+    {
+        char from[16], to[16], length[16];
+        formatTime(p->trimIn, info->fps, from, sizeof(from));
+        formatTime(p->trimOut + 1, info->fps, to, sizeof(to));
+        formatTime(p->trimOut + 1 - p->trimIn, info->fps, length, sizeof(length));
+        playerRow(14, C_INFO, " Keep %s to %s (%s)", from, to, length);
+        if (p->trimConfirm)
+            playerRow(15, C_KEY, " Save it as a new clip?  A: save  B: no");
+        else if (p->trimMessage != NULL)
+            playerRow(15, C_WARN, " %s", p->trimMessage);
+        else
+            playerRow(15, C_NORMAL, "");
+    }
+    else
+    {
+        playerRow(14, C_NORMAL, "");
+        playerRow(15, C_NORMAL, "");
+    }
 }
 
-// One frame of the player. Returns false when it should close.
+// One frame of the player. Returns false when it should close (with trimSave
+// set if the selection is to be saved).
 static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
 {
     u32 count = p->clip.info.frameCount, fps = p->clip.info.fps;
 
-    if (down & KEY_B)
+    // Asking whether to save the selection: nothing else until it's answered.
+    if (p->trimConfirm)
+    {
+        if (down & KEY_A)
+        {
+            p->trimSave = true;
+            return false;
+        }
+        if (down & (KEY_B | KEY_X))
+            p->trimConfirm = false;
+        return true;
+    }
+
+    // SELECT starts and stops trimming (B stops it too, rather than leaving).
+    if ((down & KEY_SELECT) || (p->trimMode && (down & KEY_B)))
+    {
+        p->trimMode = !p->trimMode;
+        p->trimMessage = NULL;
+        drawPlayerStatic(p);
+    }
+    else if (down & KEY_B)
         return false;
+
+    // What plays: the selection while trimming, otherwise the whole clip.
+    u32 lo = p->trimMode ? p->trimIn : 0, hi = p->trimMode ? p->trimOut + 1 : count;
 
     if (down & KEY_A)
     {
@@ -1200,8 +1384,8 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
             p->playing = false;
         else
         {
-            if (p->frame + 1 >= count)
-                p->frame = 0;
+            if (p->frame + 1 >= hi || p->frame < lo)
+                p->frame = lo;
             p->playing = true;
             playerRebase(p);
         }
@@ -1216,24 +1400,60 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
         p->playing = false;
         playerSeek(p, (s32)p->frame + 1);
     }
-    if (repeat & KEY_L)
-        playerSeek(p, (s32)p->frame - (s32)fps);
-    if (repeat & KEY_R)
-        playerSeek(p, (s32)p->frame + (s32)fps);
-    if ((down & KEY_DUP) && p->speed + 1 < SPEED_COUNT)
+    if (p->trimMode)
     {
-        p->speed++;
-        playerRebase(p);
+        if (repeat & KEY_DUP)
+            playerSeek(p, (s32)p->frame + (s32)fps);
+        if (repeat & KEY_DDOWN)
+            playerSeek(p, (s32)p->frame - (s32)fps);
+        if (down & KEY_L)
+        {
+            p->trimIn = p->frame;
+            if (p->trimOut < p->trimIn)
+                p->trimOut = p->trimIn;
+            p->trimMessage = NULL;
+        }
+        if (down & KEY_R)
+        {
+            p->trimOut = p->frame;
+            if (p->trimIn > p->trimOut)
+                p->trimIn = p->trimOut;
+            p->trimMessage = NULL;
+        }
+        if (down & KEY_X)
+        {
+            if (p->trimIn == 0 && p->trimOut + 1 == count)
+                p->trimMessage = "Set a start (L) or an end (R) first.";
+            else
+            {
+                p->trimConfirm = true;
+                p->playing = false;
+            }
+        }
+        lo = p->trimIn;
+        hi = p->trimOut + 1;
     }
-    if ((down & KEY_DDOWN) && p->speed > 0)
+    else
     {
-        p->speed--;
-        playerRebase(p);
+        if (repeat & KEY_L)
+            playerSeek(p, (s32)p->frame - (s32)fps);
+        if (repeat & KEY_R)
+            playerSeek(p, (s32)p->frame + (s32)fps);
+        if ((down & KEY_DUP) && p->speed + 1 < SPEED_COUNT)
+        {
+            p->speed++;
+            playerRebase(p);
+        }
+        if ((down & KEY_DDOWN) && p->speed > 0)
+        {
+            p->speed--;
+            playerRebase(p);
+        }
+        if (down & KEY_X)
+            p->showStats = !p->showStats;
     }
     if (down & KEY_Y)
         p->loop = !p->loop;
-    if (down & KEY_X)
-        p->showStats = !p->showStats;
     p->scrubbing = false;
     if (!(held & KEY_TOUCH))
         p->touchWait = false;
@@ -1253,16 +1473,16 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
     if (p->playing && p->error == NULL)
     {
         u32 frame = playerClockFrame(p);
-        if (frame >= count)
+        if (frame >= hi)
         {
             if (p->loop)
             {
-                p->frame = frame % count;
+                p->frame = lo + (frame - hi) % (hi - lo);
                 playerRebase(p);
             }
             else
             {
-                p->frame = count - 1;
+                p->frame = hi - 1;
                 p->playing = false;
             }
         }
@@ -1337,8 +1557,12 @@ int main(void)
         {
             if (!playerUpdate(&g_player, down, repeat, held))
             {
-                audioStop(&g_player);
-                flbClose(&g_player.clip);
+                // The selection to save, if any (its size while the clip is still open).
+                Player *p = &g_player;
+                u32 trimFrames = p->trimOut + 1 - p->trimIn;
+                u64 trimBytes = p->trimSave ? flbTrimSize(&p->clip, p->trimIn, trimFrames) : 0;
+                audioStop(p);
+                flbClose(&p->clip);
                 playing = false;
                 consoleClear();
                 scanClips(true);
@@ -1346,11 +1570,15 @@ int main(void)
                 ls.previewFor = -1;
                 ls.settle = 0;
                 dirty = true;
+                if (p->trimSave)
+                    startTrim(&ls, p->fileName, p->trimIn, trimFrames, trimBytes);
             }
             else
             {
                 playerAudio(&g_player);
+                u64 t0 = svcGetSystemTick();
                 drawPlayer(&g_player);
+                g_player.textUs = (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
             }
         }
         else if (ls.compacting)
@@ -1359,7 +1587,8 @@ int main(void)
             {
                 flbCompactCancel(&g_compactor);
                 ls.compacting = false;
-                setMessage(&ls, "Compacting cancelled; the clip wasn't changed.", true);
+                setMessage(&ls, ls.trimming ? "Trimming cancelled; nothing was saved." :
+                                              "Compacting cancelled; the clip wasn't changed.", true);
                 dirty = true;
             }
             else
@@ -1375,18 +1604,27 @@ int main(void)
                     drawCompacting(&ls);
                 else
                 {
-                    char name[sizeof(g_clips[0].name)];
-                    strcpy(name, g_clips[ls.selected].name);
+                    // (Selects the trimmed copy, once it's saved.)
                     ls.compacting = false;
                     scanClips(true);
-                    selectClip(&ls, name);
+                    selectClip(&ls, ls.jobClip);
                     clampList(&ls);
-                    if (result == 1)
+                    unsigned long secs = (unsigned long)((svcGetSystemTick() - ls.compactStart) / SYSCLOCK_ARM11);
+                    const Clip *c = &g_clips[ls.selected];
+                    if (result == 1 && ls.trimming)
+                    {
+                        char length[12], size[16];
+                        formatLength(c->info.frameCount, c->info.fps, length, sizeof(length));
+                        formatSize(c->info.fileSize, size, sizeof(size));
+                        snprintf(g_messageText, sizeof(g_messageText), "Trimmed: saved %.50s (%s, %s) in %lu s.",
+                                 ls.jobClip, length, size, secs);
+                        setMessage(&ls, g_messageText, true);
+                    }
+                    else if (result == 1)
                     {
                         char from[16], to[16];
                         formatSize(ls.compactFrom, from, sizeof(from));
-                        formatSize(g_clips[ls.selected].info.fileSize, to, sizeof(to));
-                        unsigned long secs = (unsigned long)((svcGetSystemTick() - ls.compactStart) / SYSCLOCK_ARM11);
+                        formatSize(c->info.fileSize, to, sizeof(to));
                         snprintf(g_messageText, sizeof(g_messageText), "Compacted: %s -> %s in %lu s.", from, to, secs);
                         setMessage(&ls, g_messageText, true);
                     }
@@ -1417,6 +1655,8 @@ int main(void)
                 else if (flbCompactBegin(&g_compactor, path, &error))
                 {
                     ls.compacting = true;
+                    ls.trimming = false;
+                    snprintf(ls.jobClip, sizeof(ls.jobClip), "%s", c->name);
                     ls.compactFrom = c->info.fileSize;
                     ls.compactStart = svcGetSystemTick();
                     setMessage(&ls, NULL, false);
@@ -1527,9 +1767,10 @@ int main(void)
                 renameClip(&ls);
                 dirty = true;
             }
-            else if (play && g_clipCount > 0)
+            else if ((play || (down & KEY_SELECT)) && g_clipCount > 0)
             {
                 // (A damaged clip's details already say why it can't be played.)
+                // SELECT opens it for trimming, paused at the start.
                 const Clip *c = &g_clips[ls.selected];
                 const char *error;
                 if (c->error == NULL)
@@ -1537,6 +1778,11 @@ int main(void)
                     if (playerOpen(&g_player, c, &error))
                     {
                         playing = true;
+                        if (down & KEY_SELECT)
+                        {
+                            g_player.trimMode = true;
+                            g_player.playing = false;
+                        }
                         drawPlayerStatic(&g_player);
                     }
                     else

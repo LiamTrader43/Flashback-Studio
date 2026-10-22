@@ -10,9 +10,9 @@
 #define FLB_VERSION_AUDIO    3
 #define FLB_AUDIO_INFO_SIZE  32
 
-// A compacted copy is written in blocks of this many bytes, each at a multiple
-// of it in the file (the last one is shorter): every SD write has a fixed cost,
-// so fewer, bigger, aligned writes are faster.
+// A compacted or trimmed copy is written in blocks of this many bytes, each at
+// a multiple of it in the file (the last one is shorter): every SD write has a
+// fixed cost, so fewer, bigger, aligned writes are faster.
 #define FLB_COMPACT_BUFFER  (512 * 1024)
 
 static char g_error[96];
@@ -45,9 +45,22 @@ bool flbIsCompacted(const FlbInfo *info)
     return info->version == FLB_VERSION_COMPACT || (info->version == FLB_VERSION_AUDIO && info->slotStride == 0);
 }
 
+// How many audio samples 'frames' frames of the clip last, rounded.
+static uint32_t flbAudioSamplesIn(const FlbInfo *info, uint32_t frames)
+{
+    return (uint32_t)(((uint64_t)frames * info->audioRateMhz / info->fps + 500) / 1000);
+}
+
 uint32_t flbAudioSamples(const FlbInfo *info)
 {
-    return (uint32_t)(((uint64_t)info->frameCount * info->audioRateMhz / info->fps + 500) / 1000);
+    return flbAudioSamplesIn(info, info->frameCount);
+}
+
+// How many audio samples into its entry's audio copy number 'frame' of it
+// starts (each copy comes sampleRate / fps samples after the one before).
+static uint32_t flbAudioOffsetOf(const FlbInfo *info, uint32_t frame)
+{
+    return (uint32_t)((uint64_t)frame * info->audioRateMhz / ((uint64_t)info->fps * 1000));
 }
 
 // The same checks as convert_flashback.bat, with the same messages.
@@ -272,15 +285,42 @@ bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, c
     return true;
 }
 
-uint64_t flbCompactSize(const FlbClip *clip)
+// The index entries frames firstFrame .. firstFrame + frameCount - 1 use:
+// *first holds the first of them, *end is one past the one holding the last.
+static void flbEntryRange(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount, uint32_t *first, uint32_t *end)
+{
+    *first = flbEntryForFrame(clip, firstFrame);
+    *end = flbEntryForFrame(clip, firstFrame + frameCount - 1) + 1;
+}
+
+// How many of those frames entry 'e' is shown for (fewer than its copies if the
+// range starts or ends part way through them).
+static uint32_t flbCopiesIn(const FlbClip *clip, uint32_t e, uint32_t firstFrame, uint32_t frameCount)
+{
+    const FlbEntry *entry = &clip->entries[e];
+    uint32_t from = entry->firstFrame > firstFrame ? entry->firstFrame : firstFrame;
+    uint32_t to = entry->firstFrame + entry->copies;
+    if (to > firstFrame + frameCount)
+        to = firstFrame + frameCount;
+    return to - from;
+}
+
+uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount)
 {
     const FlbInfo *info = &clip->info;
-    uint64_t size = (uint64_t)info->entryCount * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE;
-    for (uint32_t e = 0; e < info->entryCount; e++)
+    uint32_t first, end;
+    flbEntryRange(clip, firstFrame, frameCount, &first, &end);
+    uint64_t size = (uint64_t)(end - first) * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE;
+    for (uint32_t e = first; e < end; e++)
         size += clip->entries[e].size;
     if (info->hasAudio)
-        size += (uint64_t)flbAudioSamples(info) * 4;
+        size += (uint64_t)flbAudioSamplesIn(info, frameCount) * 4;
     return size;
+}
+
+uint64_t flbCompactSize(const FlbClip *clip)
+{
+    return flbTrimSize(clip, 0, clip->info.frameCount);
 }
 
 static void flbCompactFree(FlbCompactor *c)
@@ -301,60 +341,110 @@ void flbCompactCancel(FlbCompactor *c)
     remove(c->tmpPath);
 }
 
-bool flbCompactBegin(FlbCompactor *c, const char *path, const char **error)
+// Starts copying frames firstFrame .. firstFrame + frameCount - 1 (all of them
+// if frameCount is UINT32_MAX) of the clip at 'path' to 'outPath': the clip
+// itself when compacting.
+static bool flbCopyBegin(FlbCompactor *c, const char *path, const char *outPath, uint32_t firstFrame,
+                         uint32_t frameCount, const char **error)
 {
     memset(c, 0, sizeof(*c));
-    if (strlen(path) >= sizeof(c->path))
+    if (strlen(path) >= sizeof(c->path) || strlen(outPath) >= sizeof(c->outPath))
     {
         *error = "the clip's name is too long";
         return false;
     }
     strcpy(c->path, path);
-    snprintf(c->tmpPath, sizeof(c->tmpPath), "%s.tmp", path);
+    strcpy(c->outPath, outPath);
+    snprintf(c->tmpPath, sizeof(c->tmpPath), "%s.tmp", outPath);
 
     if (!flbOpen(&c->clip, path, error))
         return false;
     const FlbInfo *info = &c->clip.info;
-    if (flbIsCompacted(info))
+    bool compacting = strcmp(path, outPath) == 0;
+    if (compacting && flbIsCompacted(info))
     {
         flbClose(&c->clip);
         *error = "this clip is already compacted";
         return false;
     }
+    if (frameCount == UINT32_MAX)
+        frameCount = info->frameCount;
+    if (frameCount == 0 || firstFrame >= info->frameCount || frameCount > info->frameCount - firstFrame)
+    {
+        flbClose(&c->clip);
+        *error = "those frames aren't in the clip";
+        return false;
+    }
+    c->firstFrame = firstFrame;
+    c->frameCount = frameCount;
+    flbEntryRange(&c->clip, firstFrame, frameCount, &c->firstEntry, &c->endEntry);
+    c->next = c->firstEntry;
 
-    // Just the audio the clip's frames last, from the first one on.
+    // Just the audio the frames last, from where the first one's starts (its
+    // entry's, plus the copies of it skipped): readers play a clip's audio
+    // straight on from its first entry's position, which is then 0.
     if (info->hasAudio)
     {
-        c->audioStart = c->clip.entries[0].audioPos;
-        c->audioCount = flbAudioSamples(info);
+        const FlbEntry *first = &c->clip.entries[c->firstEntry];
+        c->audioStart = first->audioPos + flbAudioOffsetOf(info, firstFrame - first->firstFrame);
+        c->audioCount = flbAudioSamplesIn(info, frameCount);
     }
-    c->total = flbCompactSize(&c->clip) - (uint64_t)info->entryCount * flbEntrySize(info) -
+    uint64_t size = flbTrimSize(&c->clip, firstFrame, frameCount);
+    c->total = size - (uint64_t)(c->endEntry - c->firstEntry) * flbEntrySize(info) -
                flbAudioInfoSize(info) - FLB_TRAILER_SIZE;
     c->buf = malloc(FLB_COMPACT_BUFFER);
-    c->offsets = malloc((size_t)c->clip.info.entryCount * sizeof(uint32_t));
+    c->offsets = malloc((size_t)(c->endEntry - c->firstEntry) * sizeof(uint32_t));
     if (c->buf == NULL || c->offsets == NULL)
     {
         flbCompactFree(c);
-        *error = "not enough memory to compact this clip";
+        *error = "not enough memory to copy this clip";
         return false;
+    }
+    // A trimmed clip is a new one: never write over another.
+    if (!compacting)
+    {
+        FILE *existing = fopen(outPath, "rb");
+        if (existing != NULL)
+        {
+            fclose(existing);
+            flbCompactFree(c);
+            *error = "there's already a clip with that name";
+            return false;
+        }
     }
     c->out = fopen(c->tmpPath, "wb");
     if (c->out == NULL)
     {
         flbCompactFree(c);
-        *error = "the compacted copy couldn't be created";
+        *error = "the copy couldn't be created";
         return false;
     }
     setvbuf(c->out, NULL, _IONBF, 0);   // (it's written in whole blocks already)
     // The copy at its full size up front: its SD space is claimed once,
     // instead of the file growing with every block.
-    if (ftruncate(fileno(c->out), (off_t)flbCompactSize(&c->clip)) != 0)
+    if (ftruncate(fileno(c->out), (off_t)size) != 0)
     {
         flbCompactCancel(c);
-        *error = "the compacted copy couldn't be created (is the SD card full?)";
+        *error = "the copy couldn't be created (is the SD card full?)";
         return false;
     }
     return true;
+}
+
+bool flbCompactBegin(FlbCompactor *c, const char *path, const char **error)
+{
+    return flbCopyBegin(c, path, path, 0, UINT32_MAX, error);
+}
+
+bool flbTrimBegin(FlbCompactor *c, const char *path, const char *outPath, uint32_t firstFrame,
+                  uint32_t frameCount, const char **error)
+{
+    if (strcmp(path, outPath) == 0)
+    {
+        *error = "the trimmed clip needs a name of its own";
+        return false;
+    }
+    return flbCopyBegin(c, path, outPath, firstFrame, frameCount, error);
 }
 
 static bool flbCompactFlush(FlbCompactor *c)
@@ -382,33 +472,42 @@ static bool flbCompactPut(FlbCompactor *c, const uint8_t *src, uint32_t len)
     return true;
 }
 
-// Writes the index (audio info) and trailer, then swaps the copy in for the
-// clip: the clip is renamed out of the way first, so there's always a whole
-// clip on the SD card (see flbCleanUpLeftover).
+// Writes the index (audio info) and trailer, checks the copy reads back, then
+// makes it the clip. Compacting swaps it in for the clip: the clip is renamed
+// out of the way first, so there's always a whole clip on the SD card (see
+// flbCleanUpLeftover). Trimming gives it its own name.
 static bool flbCompactFinish(FlbCompactor *c, const char **error)
 {
     const FlbInfo *info = &c->clip.info;
+    uint32_t entries = c->endEntry - c->firstEntry;
     uint32_t entrySize = flbEntrySize(info);
-    uint32_t indexSize = info->entryCount * entrySize + flbAudioInfoSize(info);
+    uint32_t indexSize = entries * entrySize + flbAudioInfoSize(info);
     uint8_t *index = malloc(indexSize + FLB_TRAILER_SIZE);
     if (index == NULL)
     {
-        *error = "not enough memory to compact this clip";
+        *error = "not enough memory to copy this clip";
         return false;
     }
-    for (uint32_t e = 0; e < info->entryCount; e++)
+    for (uint32_t i = 0; i < entries; i++)
     {
+        uint32_t e = c->firstEntry + i;
         const FlbEntry *entry = &c->clip.entries[e];
-        uint8_t *p = index + e * entrySize;
-        flbPut32(p, c->offsets[e]);
+        uint8_t *p = index + i * entrySize;
+        flbPut32(p, c->offsets[i]);
         flbPut32(p + 4, entry->size);
-        flbPut32(p + 8, entry->copies);
-        if (info->hasAudio)     // (the copy's audio starts at the first frame)
-            flbPut32(p + 12, entry->audioPos > c->audioStart ? entry->audioPos - c->audioStart : 0);
+        flbPut32(p + 8, flbCopiesIn(&c->clip, e, c->firstFrame, c->frameCount));
+        if (info->hasAudio)
+        {
+            // The copy's audio starts at its first frame, and its first entry
+            // may be kept from part way through its copies.
+            uint32_t skipped = entry->firstFrame < c->firstFrame ? c->firstFrame - entry->firstFrame : 0;
+            uint32_t pos = entry->audioPos + flbAudioOffsetOf(info, skipped);
+            flbPut32(p + 12, pos > c->audioStart ? pos - c->audioStart : 0);
+        }
     }
     if (info->hasAudio)
     {
-        uint8_t *a = index + info->entryCount * entrySize;
+        uint8_t *a = index + entries * entrySize;
         memset(a, 0, FLB_AUDIO_INFO_SIZE);
         flbPut32(a, info->audioRateMhz);
         a[4] = 2;       // channels
@@ -428,8 +527,8 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     flbPut32(t + 16, info->fps);
     flbPut32(t + 20, 0);    // no slots
     flbPut32(t + 24, info->slotBytes);
-    flbPut32(t + 28, info->entryCount);
-    flbPut32(t + 32, info->frameCount);
+    flbPut32(t + 28, entries);
+    flbPut32(t + 32, c->frameCount);
     flbPut32(t + 36, (uint32_t)c->copied);
 
     bool ok = flbCompactPut(c, index, indexSize + FLB_TRAILER_SIZE) && flbCompactFlush(c);
@@ -438,21 +537,31 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     c->out = NULL;
     if (!ok)
     {
-        *error = "the compacted copy couldn't be written (is the SD card full?)";
+        *error = "the copy couldn't be written (is the SD card full?)";
         return false;
     }
 
-    // Check the copy reads back as a whole clip before it replaces the original.
+    // Check the copy reads back as a whole clip before it's used.
     FlbClip check;
     if (!flbOpen(&check, c->tmpPath, error))
         return false;
-    ok = check.info.frameCount == info->frameCount && check.info.entryCount == info->entryCount &&
+    ok = check.info.frameCount == c->frameCount && check.info.entryCount == entries &&
          check.info.fileSize == c->copied + indexSize + FLB_TRAILER_SIZE;
     flbClose(&check);
     if (!ok)
     {
-        *error = "the compacted copy didn't read back correctly";
+        *error = "the copy didn't read back correctly";
         return false;
+    }
+
+    if (strcmp(c->path, c->outPath) != 0)
+    {
+        if (rename(c->tmpPath, c->outPath) != 0)
+        {
+            *error = "the trimmed clip couldn't be saved";
+            return false;
+        }
+        return true;
     }
 
     flbClose(&c->clip);     // (it can't be renamed while open)
@@ -477,7 +586,7 @@ int flbCompactStep(FlbCompactor *c, const char **error)
 {
     const FlbInfo *info = &c->clip.info;
 
-    if (c->next < info->entryCount)
+    if (c->next < c->endEntry)
     {
         // (Read into the clip's frame buffer: a frame can straddle two blocks.)
         const FlbEntry *e = &c->clip.entries[c->next];
@@ -489,10 +598,10 @@ int flbCompactStep(FlbCompactor *c, const char **error)
         }
         if (!flbCompactPut(c, c->clip.stored, e->size))
         {
-            *error = "the compacted copy couldn't be written (is the SD card full?)";
+            *error = "the copy couldn't be written (is the SD card full?)";
             goto fail;
         }
-        c->offsets[c->next++] = (uint32_t)c->copied;
+        c->offsets[c->next++ - c->firstEntry] = (uint32_t)c->copied;
         c->copied += e->size;
         return 0;
     }
@@ -508,7 +617,7 @@ int flbCompactStep(FlbCompactor *c, const char **error)
             goto fail;
         if (!flbCompactPut(c, c->clip.stored, n * 4))
         {
-            *error = "the compacted copy couldn't be written (is the SD card full?)";
+            *error = "the copy couldn't be written (is the SD card full?)";
             goto fail;
         }
         c->copied += n * 4;

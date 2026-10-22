@@ -109,18 +109,26 @@ bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, c
 // The size of an open clip once compacted.
 uint64_t flbCompactSize(const FlbClip *clip);
 
-// Compacting: the clip's frames are copied into "<clip>.tmp", a few at a time
-// (so the caller can show progress), which then replaces the clip. The clip
-// itself is only touched at the very end, and is left as it was if anything
-// fails or the compaction is cancelled.
+// The size of frames firstFrame .. firstFrame + frameCount - 1 of an open clip,
+// trimmed (as a compacted clip).
+uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount);
+
+// Compacting and trimming: the clip's frames (all of them, or the ones kept)
+// and their audio are copied into "<copy>.tmp", a few at a time (so the caller
+// can show progress), which then replaces the clip (compacting) or becomes a
+// new clip (trimming). The clip itself is only touched at the very end of a
+// compaction, and is left as it was if anything fails or it's cancelled.
 typedef struct FlbCompactor {
     FlbClip clip;
     FILE *out;
     char path[256];         // the clip
-    char tmpPath[264];      // the compacted copy, until it replaces the clip
+    char outPath[256];      // the copy: the clip itself when compacting
+    char tmpPath[264];      // the copy, until it's finished
+    uint32_t firstFrame, frameCount;    // the frames copied
+    uint32_t firstEntry, endEntry;      // the index entries they use
     uint8_t *buf;           // the block of the copy being filled
     uint32_t bufLen;
-    uint32_t *offsets;      // each entry's offset in the copy
+    uint32_t *offsets;      // each copied entry's offset in the copy
     uint32_t next;          // the next entry to copy
     uint32_t audioStart, audioCount, audioDone, audioOffset;   // the audio track: copied after the frames
     uint64_t copied, total; // bytes copied so far, and in all
@@ -130,13 +138,20 @@ typedef struct FlbCompactor {
 // 'error' at a message.
 bool flbCompactBegin(FlbCompactor *c, const char *path, const char **error);
 
-// Copies the next frame. Returns 0 while there's more to do, 1 once the clip
-// has been replaced by its compacted copy, or -1 on failure (with 'error' set;
-// the copy is deleted and the clip left as it was). Either way, once it returns
-// 1 or -1 the compactor is finished with.
+// Starts copying frames firstFrame .. firstFrame + frameCount - 1 of the clip
+// at 'path', with their audio, into a new clip at 'outPath' (which mustn't
+// exist). On failure returns false and points 'error' at a message.
+bool flbTrimBegin(FlbCompactor *c, const char *path, const char *outPath, uint32_t firstFrame,
+                  uint32_t frameCount, const char **error);
+
+// Copies the next frame. Returns 0 while there's more to do, 1 once the copy is
+// finished (the clip replaced by its compacted copy, or the trimmed clip
+// saved), or -1 on failure (with 'error' set; the copy is deleted and the clip
+// left as it was). Either way, once it returns 1 or -1 the compactor is
+// finished with.
 int flbCompactStep(FlbCompactor *c, const char **error);
 
-// Stops compacting and deletes the copy; the clip is left as it was.
+// Stops and deletes the copy; the clip is left as it was.
 void flbCompactCancel(FlbCompactor *c);
 
 // Cleans up after a compaction that was cut off (the console turned off, for
