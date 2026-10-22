@@ -82,7 +82,8 @@ public static class FlashbackClip
         }
     }
 
-    // Port of flashbackDecompress: QOI-style ops on RGB565 pixels.
+    // The recorder's frame compression, QOI-style ops on RGB565 pixels (see
+    // flashbackCompress in Luma3DS-Flashback's flashback.c).
     static bool Unpack(byte[] src, int len, ushort[] dst, int pixels)
     {
         ushort[] index = new ushort[64];

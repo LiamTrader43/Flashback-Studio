@@ -17,11 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/stat.h>
 
 #include "flb.h"
 
 #define CLIP_DIR    "sdmc:/luma/flashback/"
 #define MAX_CLIPS   512
+#define NAME_MAX_LEN 64     // a clip's name when renaming it (without ".flb")
 
 #define COLS        40
 
@@ -704,7 +706,7 @@ static void drawList(const ListState *ls)
     {
         row(27, C_NORMAL, g_clipCount ? " A Play  X Delete  R Compact  Y Refresh" : " Y Refresh");
         row(28, C_NORMAL, g_clipCount ? " D-Pad/touch Select   Touch again Play" : "");
-        row(29, C_NORMAL, " START Exit");
+        row(29, C_NORMAL, g_clipCount ? " L Rename   START Exit" : " START Exit");
     }
 }
 
@@ -763,6 +765,132 @@ static void clampList(ListState *ls)
         ls->scroll = rows - GRID_ROWS;
     if (ls->scroll < 0)
         ls->scroll = 0;
+}
+
+// The file name for a name typed in the keyboard, 'len' bytes of 'text': each
+// space made a dash, and ".flb" added (unless it was typed too). Returns the
+// length of the name itself.
+static size_t clipFileName(const char *text, size_t len, char *out, size_t size)
+{
+    if (len >= 4 && strncasecmp(text + len - 4, ".flb", 4) == 0)
+        len -= 4;
+    snprintf(out, size, "%.*s.flb", (int)len, text);
+    for (char *p = out; *p != '\0'; p++)
+        if (*p == ' ')
+            *p = '-';
+    return len;
+}
+
+// Windows reserves these names (before the first dot, whatever the case) for
+// devices: the SD card takes them, but a clip named one couldn't be copied to
+// a PC.
+static bool isReservedName(const char *name)
+{
+    size_t stem = strcspn(name, ".");
+    if (stem == 3)
+        return strncasecmp(name, "CON", 3) == 0 || strncasecmp(name, "PRN", 3) == 0 ||
+               strncasecmp(name, "AUX", 3) == 0 || strncasecmp(name, "NUL", 3) == 0;
+    if (stem == 4 && (strncasecmp(name, "COM", 3) == 0 || strncasecmp(name, "LPT", 3) == 0))
+        return name[3] >= '0' && name[3] <= '9';
+    return false;
+}
+
+// Checks a new clip name as it's confirmed in the keyboard: if it can't be
+// used, the keyboard says why and stays open. 'user' is the clip's file name.
+// (The keyboard can't stop characters from being typed, only refuse them here.)
+static SwkbdCallbackResult checkClipName(void *user, const char **message, const char *text, size_t len)
+{
+    char name[sizeof(g_clips[0].name)], path[160];
+    struct stat st;
+    size_t base = clipFileName(text, len, name, sizeof(name));
+
+    for (size_t i = 0; i < base; i++)
+    {
+        unsigned char ch = (unsigned char)text[i];
+        if (ch < 0x20 || ch > 0x7E || strchr("\\/:*?\"<>|", ch) != NULL)
+        {
+            *message = "Use letters, numbers and punctuation other than \\ / : * ? \" < > |. (Spaces become dashes.)";
+            return SWKBD_CALLBACK_CONTINUE;
+        }
+    }
+    if (base == 0 || text[base - 1] == '.')
+    {
+        *message = "The name can't be empty or end with a dot.";
+        return SWKBD_CALLBACK_CONTINUE;
+    }
+    if (isReservedName(name))
+    {
+        *message = "Windows can't use that name (CON, PRN, AUX, NUL, COM0-9 and LPT0-9 are taken), "
+                   "so the clip couldn't be copied to a PC. Try another.";
+        return SWKBD_CALLBACK_CONTINUE;
+    }
+    snprintf(path, sizeof(path), CLIP_DIR "%s", name);
+    if (strcasecmp(name, (const char *)user) != 0 && stat(path, &st) == 0)
+    {
+        *message = "There's already a clip with that name.";
+        return SWKBD_CALLBACK_CONTINUE;
+    }
+    return SWKBD_CALLBACK_OK;
+}
+
+// Asks for a new name for the selected clip with the system keyboard, and
+// renames it.
+static void renameClip(ListState *ls)
+{
+    char current[sizeof(g_clips[0].name)], initial[sizeof(current)], text[NAME_MAX_LEN * 4 + 1];
+    snprintf(current, sizeof(current), "%s", g_clips[ls->selected].name);
+    snprintf(initial, sizeof(initial), "%.*s", (int)strlen(current) - 4, current);  // without ".flb"
+
+    SwkbdState kb;
+    swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, NAME_MAX_LEN);
+    swkbdSetHintText(&kb, "Clip name (spaces become dashes)");
+    swkbdSetInitialText(&kb, initial);
+    swkbdSetButton(&kb, SWKBD_BUTTON_LEFT, "Cancel", false);
+    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "Rename", true);
+    swkbdSetValidation(&kb, SWKBD_NOTEMPTY_NOTBLANK, SWKBD_FILTER_CALLBACK, 0);
+    swkbdSetFilterCallback(&kb, checkClipName, current);
+    SwkbdButton button = swkbdInputText(&kb, text, sizeof(text));
+
+    // The keyboard was drawn over both screens.
+    consoleClear();
+    ls->previewFor = -1;
+    ls->settle = 0;
+
+    char name[sizeof(current)], from[160], to[160];
+    clipFileName(text, strlen(text), name, sizeof(name));
+    if (button != SWKBD_BUTTON_RIGHT || strcmp(name, current) == 0)
+        return;
+    snprintf(from, sizeof(from), CLIP_DIR "%s", current);
+    snprintf(to, sizeof(to), CLIP_DIR "%s", name);
+
+    bool ok;
+    if (strcasecmp(name, current) == 0)
+    {
+        // Only capitals change, which the SD card's file system sees as the
+        // same name: go through "<clip>.old", which the next start puts back
+        // if this is cut off (see flbCleanUpLeftover).
+        char old[sizeof(from) + 4];
+        snprintf(old, sizeof(old), "%s.old", from);
+        ok = rename(from, old) == 0;
+        if (ok && rename(old, to) != 0)
+        {
+            rename(old, from);
+            ok = false;
+        }
+    }
+    else
+        ok = rename(from, to) == 0;
+
+    if (!ok)
+    {
+        setMessage(ls, "The clip couldn't be renamed.", false);
+        return;
+    }
+    scanClips(true);
+    selectClip(ls, name);
+    clampList(ls);
+    snprintf(g_messageText, sizeof(g_messageText), "Renamed to %.80s.", name);   // (names are at most NAME_MAX_LEN + 4)
+    setMessage(ls, g_messageText, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,6 +1521,11 @@ int main(void)
                     }
                     dirty = true;
                 }
+            }
+            else if ((down & KEY_L) && g_clipCount > 0)
+            {
+                renameClip(&ls);
+                dirty = true;
             }
             else if (play && g_clipCount > 0)
             {

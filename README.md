@@ -63,6 +63,7 @@ The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first:
 | A | Play the clip |
 | X | Delete the clip (asks first) |
 | R | Compact the clip (asks first; see below) |
+| L | Rename the clip, with the 3DS keyboard (spaces become dashes; names a file can't have, or Windows can't copy, are refused) |
 | Y | Refresh the list |
 | START | Exit |
 

@@ -560,7 +560,8 @@ bool flbCleanUpLeftover(const char *path)
     return true;
 }
 
-// Ported from flashbackDecompress in Luma3DS-Flashback's flashback.c.
+// Decodes the recorder's frame compression (see flashbackCompress in
+// Luma3DS-Flashback's flashback.c).
 bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels)
 {
     uint16_t index[64];
