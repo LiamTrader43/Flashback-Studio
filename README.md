@@ -105,7 +105,7 @@ A `.flb` file saved by Flashback (version 1) is its recording buffer saved as-is
 * **Index:** the clip's frames in order, with how many times each one repeats (missed frames are filled with copies of the previous one so clips play at the right speed).
 * **Trailer:** the last 48 bytes, starting with the magic `FLBK` and holding the version, resolution, frame rate and frame count.
 
-Version 1 is documented next to `flashbackSaveClipFile` in [`sysmodules/rosalina/source/flashback.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback.c) of Luma3DS-Flashback, and the decoders in the converter and the 3DS app are direct ports of the recorder's code.
+Version 1 is documented next to `flashbackSaveClipFile` in [`sysmodules/rosalina/source/flashback.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress`; the decoders in the converter and the 3DS app follow those descriptions.
 
 A compacted clip (version 2) has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot. A clip with audio (version 3, recorded or compacted) also holds the sound, stereo 16-bit at the 3DS's 32,728 Hz, and each frame's position in it. All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h).
 
