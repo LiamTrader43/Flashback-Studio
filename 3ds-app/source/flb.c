@@ -15,6 +15,9 @@
 // fixed cost, so fewer, bigger, aligned writes are faster.
 #define FLB_COMPACT_BUFFER  (512 * 1024)
 
+// SD card sector size: frames are read in whole sectors (see flbDecodeEntry).
+#define FLB_SECTOR          512
+
 static char g_error[96];
 
 static uint32_t flbU32(const uint8_t *p)
@@ -165,7 +168,7 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
     uint32_t entrySize = flbEntrySize(info);
     uint8_t *index = malloc((size_t)info->entryCount * entrySize + 1);
     clip->entries = malloc((size_t)info->entryCount * sizeof(FlbEntry) + 1);
-    clip->stored = malloc(info->slotBytes);
+    clip->stored = malloc(info->slotBytes + 2 * FLB_SECTOR);   // a frame, read in whole sectors
     if (index == NULL || clip->entries == NULL || clip->stored == NULL)
     {
         free(index);
@@ -243,15 +246,28 @@ bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **e
     const FlbInfo *info = &clip->info;
     const FlbEntry *e = &clip->entries[entry];
     bool raw = e->size == info->slotBytes;
-    uint8_t *buf = raw ? (uint8_t *)dst : clip->stored;
 
-    if (fseek(clip->file, (long)e->offset, SEEK_SET) != 0 ||
-        fread(buf, 1, e->size, clip->file) != e->size)
+    // Reads start on a sector of the SD card: a compacted clip's frames start
+    // anywhere in the file, and on a 3DS a read that doesn't start on a sector
+    // is much slower (an Old 3DS played compacted clips slower than recorded
+    // ones). So the whole sectors holding the frame are read, and the frame
+    // used from where it starts in them. (A recorded clip's frames start on a
+    // sector: frames stored as they are go straight to 'dst'.)
+    uint32_t skip = e->offset % FLB_SECTOR;
+    uint8_t *buf = raw && skip == 0 ? (uint8_t *)dst : clip->stored;
+    uint32_t len = raw && skip == 0 ? e->size : (skip + e->size + FLB_SECTOR - 1) / FLB_SECTOR * FLB_SECTOR;
+
+    // (The end of the last sector can be past the end of the file: only the
+    // frame itself has to be there.)
+    if (fseek(clip->file, (long)(e->offset - skip), SEEK_SET) != 0 ||
+        fread(buf, 1, len, clip->file) < skip + e->size)
     {
         *error = "the file couldn't be read";
         return false;
     }
-    if (!raw && !flbDecompress(buf, e->size, dst, info->width * info->height))
+    if (raw && buf != (uint8_t *)dst)
+        memcpy(dst, buf + skip, e->size);
+    else if (!raw && !flbDecompress(buf + skip, e->size, dst, info->width * info->height))
     {
         snprintf(g_error, sizeof(g_error), "frame %lu is damaged", (unsigned long)entry);
         *error = g_error;
