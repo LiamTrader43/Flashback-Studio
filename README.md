@@ -54,12 +54,12 @@ Flashback Studio is a homebrew app that lists the clips on your SD card and play
 
 ### Using it
 
-The bottom screen lists the clips in `/luma/flashback/`, newest first, with their length and size. The selected clip's first frame shows on the top screen, and its resolution, frame rate, whether it has sound, and number of missed frames below the list. Half resolution clips are shown at twice their size, so they fill the screen.
+The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first: each one's first frame, with the time it was saved and its length under it. The selected clip's first frame shows full size on the top screen, and its resolution, frame rate, size, whether it has sound, and number of missed frames below the grid. Half resolution clips are shown at twice their size, so they fill the screen.
 
 | Clip list | |
 |---|---|
-| Up/Down | Select a clip |
-| Left/Right | Page up/down |
+| D-Pad | Select a clip |
+| Touch a clip | Select it (touch it again to play it) |
 | A | Play the clip |
 | X | Delete the clip (asks first) |
 | R | Compact the clip (asks first; see below) |

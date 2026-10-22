@@ -1,9 +1,11 @@
 // Flashback Studio for 3DS: browse and play the .flb clips Luma3DS-Flashback
 // saves in sd:/luma/flashback/.
 //
-// The bottom screen is a text console (clip list, playback controls); the top
-// screen shows the clip, drawn by the CPU into an RGB565 framebuffer. Half
-// resolution clips (200x120) are shown at twice their size to fill the screen.
+// The bottom screen is a text console (clip grid, playback controls), with the
+// grid's thumbnails and the player's progress bar drawn straight into its
+// framebuffer; the top screen shows the clip, drawn by the CPU into an RGB565
+// framebuffer. Half resolution clips (200x120) are shown at twice their size to
+// fill the screen.
 // Clips recorded with audio play it through NDSP (which needs the DSP firmware
 // dump sd:/3ds/dspfirm.cdc, as all homebrew with sound does).
 
@@ -22,11 +24,25 @@
 #define MAX_CLIPS   512
 
 #define COLS        40
-#define LIST_TOP    3
-#define LIST_ROWS   15
 
 #define TOP_W       400
 #define TOP_H       240
+
+// The clip list is a grid of GRID_ROWS rows of GRID_COLS tiles under the title.
+// A tile is TILE_COLS console columns by TILE_ROWS rows: a blank row, then a
+// thumbnail of the clip's first frame (drawn straight into the bottom
+// framebuffer over THUMB_ROWS console rows the text leaves empty), then two
+// rows of text.
+#define GRID_TOP    1
+#define GRID_COLS   4
+#define GRID_ROWS   2
+#define TILE_COLS   10
+#define TILE_ROWS   9
+#define THUMB_ROWS  6
+#define THUMB_W     72      // 400x240 (or 200x120) shrunk to fit, inside a frame
+#define THUMB_H     43
+#define THUMB_X     4       // the thumbnail's place in its THUMB_ROWS * 8 pixel high area
+#define THUMB_Y     3
 
 // Progress bar, drawn straight into the bottom framebuffer over console rows
 // 3-5 (pixels 24-47), which the player leaves empty.
@@ -43,6 +59,9 @@
 #define COLOR_REST      ((u16)(RGB8_to_565(60, 60, 60)))
 #define COLOR_HEAD      ((u16)(RGB8_to_565(255, 255, 255)))
 #define COLOR_MISSED    ((u16)(RGB8_to_565(255, 60, 60)))
+#define COLOR_TILE      ((u16)(RGB8_to_565(60, 60, 60)))     // a thumbnail's frame
+#define COLOR_LOADING   ((u16)(RGB8_to_565(25, 25, 25)))     // a thumbnail not read yet...
+#define COLOR_DAMAGED   ((u16)(RGB8_to_565(110, 20, 20)))    // ...or that can't be
 
 // Console colors
 #define C_NORMAL    "\x1b[0m"
@@ -58,6 +77,8 @@ typedef struct Clip {
     FlbInfo info;
     const char *error;      // why it can't be played, or NULL
     u64 compactSize;        // its size once compacted, once known (0 until then)
+    u16 *thumb;             // THUMB_W x THUMB_H of its first frame, once read...
+    bool thumbFailed;       // ...or if that failed
 } Clip;
 
 static const u32 kSpeedQuarters[] = { 1, 2, 4, 8 };
@@ -82,6 +103,7 @@ typedef struct Player {
 
     // Audio: streamed from the clip through AUDIO_BUFS NDSP wave buffers.
     bool scrubbing;         // the bar is being touched (no sound meanwhile)
+    bool touchWait;         // ignore the touch screen until it's let go (the touch that opened the clip)
     bool clockMoved;        // the picture's clock was set (a jump, a loop, play): restart the sound
     bool audioQueued;       // wave buffers are queued (the sound is playing)
     const char *audioError;
@@ -288,24 +310,39 @@ static int compareClips(const void *a, const void *b)
     return da ? strcmp(nb, na) : strcasecmp(na, nb);
 }
 
-static void scanClips(void)
+// Reads the clip folder. Clips that are still there keep their thumbnails,
+// unless 'keepThumbs' is false.
+static void scanClips(bool keepThumbs)
 {
+    // The old list, for its thumbnails (it's in the same order as the new one).
+    int oldCount = g_clipCount;
+    Clip *old = keepThumbs && oldCount > 0 ? malloc(oldCount * sizeof(Clip)) : NULL;
+    if (old != NULL)
+        memcpy(old, g_clips, oldCount * sizeof(Clip));
+    else
+    {
+        for (int i = 0; i < oldCount; i++)
+            free(g_clips[i].thumb);
+        oldCount = 0;
+    }
+
     g_clipCount = 0;
     DIR *dir = opendir(CLIP_DIR);
-    if (dir == NULL)
-        return;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL && g_clipCount < MAX_CLIPS)
+    if (dir != NULL)
     {
-        size_t len = strlen(ent->d_name);
-        if (len < 5 || len >= sizeof(g_clips[0].name) || strcasecmp(ent->d_name + len - 4, ".flb") != 0)
-            continue;
-        strcpy(g_clips[g_clipCount++].name, ent->d_name);
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL && g_clipCount < MAX_CLIPS)
+        {
+            size_t len = strlen(ent->d_name);
+            if (len < 5 || len >= sizeof(g_clips[0].name) || strcasecmp(ent->d_name + len - 4, ".flb") != 0)
+                continue;
+            strcpy(g_clips[g_clipCount++].name, ent->d_name);
+        }
+        closedir(dir);
     }
-    closedir(dir);
     qsort(g_clips, g_clipCount, sizeof(Clip), compareClips);
 
+    int j = 0;
     for (int i = 0; i < g_clipCount; i++)
     {
         Clip *c = &g_clips[i];
@@ -321,7 +358,21 @@ static void scanClips(void)
                 c->error = NULL;
             fclose(f);
         }
+
+        c->thumb = NULL;
+        c->thumbFailed = false;
+        while (j < oldCount && compareClips(&old[j], c) < 0)
+            j++;
+        if (j < oldCount && strcmp(old[j].name, c->name) == 0)
+        {
+            c->thumb = old[j].thumb;
+            old[j++].thumb = NULL;
+        }
     }
+
+    for (int i = 0; i < oldCount; i++)
+        free(old[i].thumb);
+    free(old);
 }
 
 // Cleans up after a compaction that was cut off (see flbCleanUpLeftover).
@@ -366,6 +417,60 @@ static void findCompactSize(Clip *c)
     }
 }
 
+// Shrinks a w x h frame to THUMB_W x THUMB_H, each pixel the average of the
+// ones it covers.
+static void shrinkFrame(const u16 *src, u32 w, u32 h, u16 *dst)
+{
+    for (u32 ty = 0; ty < THUMB_H; ty++)
+    {
+        u32 y0 = ty * h / THUMB_H, y1 = (ty + 1) * h / THUMB_H;
+        if (y1 == y0)
+            y1 = y0 + 1;
+        for (u32 tx = 0; tx < THUMB_W; tx++)
+        {
+            u32 x0 = tx * w / THUMB_W, x1 = (tx + 1) * w / THUMB_W;
+            if (x1 == x0)
+                x1 = x0 + 1;
+            u32 r = 0, g = 0, b = 0, n = (y1 - y0) * (x1 - x0);
+            for (u32 y = y0; y < y1; y++)
+                for (const u16 *s = src + y * w + x0, *end = src + y * w + x1; s < end; s++)
+                {
+                    r += *s >> 11;
+                    g += (*s >> 5) & 63;
+                    b += *s & 31;
+                }
+            dst[ty * THUMB_W + tx] = (u16)((r / n) << 11 | (g / n) << 5 | (b / n));
+        }
+    }
+}
+
+// Makes the clip's thumbnail from its first frame, decoded in g_frame.
+static void makeThumb(Clip *c, u32 w, u32 h)
+{
+    c->thumb = malloc(THUMB_W * THUMB_H * 2);
+    c->thumbFailed = c->thumb == NULL;
+    if (c->thumb != NULL)
+        shrinkFrame(g_frame, w, h, c->thumb);
+}
+
+// Reads the clip's first frame for its thumbnail (and its compacted size,
+// while the clip is open).
+static void loadThumb(Clip *c)
+{
+    char path[160];
+    const char *error;
+    FlbClip clip;
+    snprintf(path, sizeof(path), CLIP_DIR "%s", c->name);
+    c->thumbFailed = true;
+    if (!flbOpen(&clip, path, &error))
+        return;
+    if (c->compactSize == 0)
+        c->compactSize = flbCompactSize(&clip);
+    if (flbDecodeEntry(&clip, 0, g_frame, &error))
+        makeThumb(c, clip.info.width, clip.info.height);
+    flbClose(&clip);
+}
+
 // Free space on the SD card in bytes, or UINT64_MAX if it can't be read.
 static u64 sdFreeBytes(void)
 {
@@ -408,46 +513,119 @@ static void drawCompacting(const ListState *ls)
     clearRows(24, 26);
 }
 
+// A tile's thumbnail area (THUMB_ROWS console rows down from pixel row y0),
+// straight into the bottom framebuffer: the thumbnail in a thin frame, or on a
+// white card (which its text continues) if the clip is selected. 'c' is NULL
+// for an empty place in the grid.
+static void drawTile(u16 *fb, u32 x0, u32 y0, const Clip *c, bool selected)
+{
+    u16 fill = c == NULL ? 0 : c->error != NULL || c->thumbFailed ? COLOR_DAMAGED : COLOR_LOADING;
+    for (u32 x = 0; x < TILE_COLS * 8; x++)
+    {
+        u16 *col = fb + (x0 + x) * 240 + 239 - y0;  // pixel (x0 + x, y0 + y) is col[-y]
+        bool inX = x >= THUMB_X && x < THUMB_X + THUMB_W;
+        bool frameX = x + 2 >= THUMB_X && x < THUMB_X + THUMB_W + 2;
+        for (u32 y = 0; y < THUMB_ROWS * 8; y++)
+        {
+            u16 p = 0;
+            if (inX && y >= THUMB_Y && y < THUMB_Y + THUMB_H)
+                p = c != NULL && c->thumb != NULL ? c->thumb[(y - THUMB_Y) * THUMB_W + x - THUMB_X] : fill;
+            else if (c != NULL && selected)
+                p = COLOR_HEAD;
+            else if (c != NULL && frameX && y + 2 >= THUMB_Y && y < THUMB_Y + THUMB_H + 2)
+                p = COLOR_TILE;
+            col[-(s32)y] = p;
+        }
+    }
+}
+
+// A tile's two lines of text: when the clip was saved, and how long it is.
+static void tileText(const Clip *c, char *saved, char *length, size_t size)
+{
+    unsigned y, mo, d, h, mi, s;
+    saved[0] = length[0] = '\0';
+    if (c == NULL)
+        return;
+    if (sscanf(c->name, "clip_%4u-%2u-%2u_%2u-%2u-%2u", &y, &mo, &d, &h, &mi, &s) == 6)
+        snprintf(saved, size, "%02u:%02u:%02u", h, mi, s);
+    else
+        prettyName(c->name, saved, size);
+    if (c->error != NULL)
+        snprintf(length, size, "damaged");
+    else
+        formatLength(c->info.frameCount, c->info.fps, length, size);
+}
+
+// One console row of tile text, each tile's centered in its columns.
+static void tileTextRow(int r, char text[GRID_COLS][16], const char *const color[GRID_COLS])
+{
+    printf("\x1b[%d;1H", r + 1);
+    for (int i = 0; i < GRID_COLS; i++)
+    {
+        int len = (int)strlen(text[i]);
+        if (len > TILE_COLS)
+            len = TILE_COLS;
+        int left = (TILE_COLS - len) / 2;
+        printf("%s%*s%.*s%*s", color[i], left, "", len, text[i], TILE_COLS - left - len, "");
+    }
+    printf("%s", C_NORMAL);
+}
+
+// The title and the clip grid (see GRID_TOP).
+static void drawGrid(const ListState *ls)
+{
+    int first = ls->scroll * GRID_COLS, last = first + GRID_COLS * GRID_ROWS;
+    char counts[48];
+    if (last > g_clipCount)
+        last = g_clipCount;
+    if (g_clipCount > GRID_COLS * GRID_ROWS)
+        snprintf(counts, sizeof(counts), "%d-%d of %d ", first + 1, last, g_clipCount);
+    else
+        snprintf(counts, sizeof(counts), "%d clip%s ", g_clipCount, g_clipCount == 1 ? "" : "s");
+    row(0, C_TITLE, " Flashback Studio%*s", COLS - 17, counts);
+
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+    for (int r = 0; r < GRID_ROWS; r++)
+    {
+        int top = GRID_TOP + r * TILE_ROWS;     // a blank row, the thumbnails, two rows of text
+        char saved[GRID_COLS][16], length[GRID_COLS][16];
+        const char *color[GRID_COLS];
+        row(top, C_NORMAL, "");
+        for (int i = 0; i < GRID_COLS; i++)
+        {
+            int idx = first + r * GRID_COLS + i;
+            const Clip *c = idx < g_clipCount ? &g_clips[idx] : NULL;
+            drawTile(fb, i * TILE_COLS * 8, (top + 1) * 8, c, idx == ls->selected);
+            tileText(c, saved[i], length[i], sizeof(saved[i]));
+            color[i] = idx == ls->selected ? C_SELECTED : c != NULL && c->error != NULL ? C_WARN : C_NORMAL;
+        }
+        tileTextRow(top + 1 + THUMB_ROWS, saved, color);
+        tileTextRow(top + 2 + THUMB_ROWS, length, color);
+    }
+}
+
+// The clip shown at touch point (px, py), or -1.
+static int tileAt(const ListState *ls, u32 px, u32 py)
+{
+    int r = (int)(py / 8) - GRID_TOP;
+    if (r < 0 || r >= GRID_ROWS * TILE_ROWS || px >= GRID_COLS * TILE_COLS * 8)
+        return -1;
+    int idx = (ls->scroll + r / TILE_ROWS) * GRID_COLS + (int)(px / (TILE_COLS * 8));
+    return idx < g_clipCount ? idx : -1;
+}
+
 static void drawList(const ListState *ls)
 {
-    row(0, C_TITLE, " Flashback Studio");
     if (g_clipCount == 0)
     {
+        row(0, C_TITLE, " Flashback Studio");
         clearRows(1, 18);
         wrapRows(3, 12, C_NORMAL,
                  "No clips found in sd:/luma/flashback/. Save one with Luma3DS-Flashback "
                  "(Rosalina menu > Flashback, Format: Clip file), then come back.");
     }
     else
-    {
-        row(1, C_DIM, "%d clip%s in sd:/luma/flashback/", g_clipCount, g_clipCount == 1 ? "" : "s");
-        row(2, C_NORMAL, "");
-        for (int i = 0; i < LIST_ROWS; i++)
-        {
-            int idx = ls->scroll + i;
-            if (idx >= g_clipCount)
-            {
-                row(LIST_TOP + i, C_NORMAL, "");
-                continue;
-            }
-            const Clip *c = &g_clips[idx];
-            char name[40], len[12], size[16];
-            prettyName(c->name, name, sizeof(name));
-            if (c->error != NULL)
-                row(LIST_TOP + i, idx == ls->selected ? C_SELECTED : C_WARN, " %-19.19s  damaged", name);
-            else
-            {
-                formatLength(c->info.frameCount, c->info.fps, len, sizeof(len));
-                formatSize(c->info.fileSize, size, sizeof(size));
-                row(LIST_TOP + i, idx == ls->selected ? C_SELECTED : C_NORMAL, " %-19.19s %5s %9s", name, len, size);
-            }
-        }
-        int below = g_clipCount - (ls->scroll + LIST_ROWS);
-        if (below > 0)
-            row(LIST_TOP + LIST_ROWS, C_DIM, "   ... %d more", below);
-        else
-            row(LIST_TOP + LIST_ROWS, C_NORMAL, "");
-    }
+        drawGrid(ls);
 
     row(19, C_DIM, "----------------------------------------");
     if (g_clipCount == 0)
@@ -525,7 +703,7 @@ static void drawList(const ListState *ls)
     else
     {
         row(27, C_NORMAL, g_clipCount ? " A Play  X Delete  R Compact  Y Refresh" : " Y Refresh");
-        row(28, C_NORMAL, g_clipCount ? " Up/Down Select    Left/Right Page" : "");
+        row(28, C_NORMAL, g_clipCount ? " D-Pad/touch Select   Touch again Play" : "");
         row(29, C_NORMAL, " START Exit");
     }
 }
@@ -546,9 +724,14 @@ static void showPreview(ListState *ls)
     snprintf(path, sizeof(path), CLIP_DIR "%s", c->name);
     if (flbOpen(&clip, path, &error))
     {
-        g_clips[ls->selected].compactSize = flbCompactSize(&clip);
+        Clip *sel = &g_clips[ls->selected];
+        sel->compactSize = flbCompactSize(&clip);
         if (flbDecodeEntry(&clip, 0, g_frame, &error))
+        {
             drawTop(g_frame, clip.info.width, clip.info.height);
+            if (sel->thumb == NULL)
+                makeThumb(sel, clip.info.width, clip.info.height);
+        }
         else
             clearTop();
         flbClose(&clip);
@@ -570,12 +753,14 @@ static void clampList(ListState *ls)
         ls->selected = g_clipCount - 1;
     if (ls->selected < 0)
         ls->selected = 0;
-    if (ls->scroll > ls->selected)
-        ls->scroll = ls->selected;
-    if (ls->scroll < ls->selected - (LIST_ROWS - 1))
-        ls->scroll = ls->selected - (LIST_ROWS - 1);
-    if (ls->scroll > g_clipCount - LIST_ROWS)
-        ls->scroll = g_clipCount - LIST_ROWS;
+    // (scroll counts grid rows)
+    int sel = ls->selected / GRID_COLS, rows = (g_clipCount + GRID_COLS - 1) / GRID_COLS;
+    if (ls->scroll > sel)
+        ls->scroll = sel;
+    if (ls->scroll < sel - (GRID_ROWS - 1))
+        ls->scroll = sel - (GRID_ROWS - 1);
+    if (ls->scroll > rows - GRID_ROWS)
+        ls->scroll = rows - GRID_ROWS;
     if (ls->scroll < 0)
         ls->scroll = 0;
 }
@@ -754,6 +939,7 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
     p->shownEntry = UINT32_MAX;
     p->speed = SPEED_NORMAL;
     p->playing = true;
+    p->touchWait = true;
 
     // The recorder keeps the DSP's own sample rate, so the sound plays as is.
     if (g_ndsp && p->clip.info.hasAudio)
@@ -921,7 +1107,9 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
     if (down & KEY_X)
         p->showStats = !p->showStats;
     p->scrubbing = false;
-    if (held & KEY_TOUCH)
+    if (!(held & KEY_TOUCH))
+        p->touchWait = false;
+    if ((held & KEY_TOUCH) && !p->touchWait)
     {
         touchPosition touch;
         hidTouchRead(&touch);
@@ -1000,7 +1188,7 @@ int main(void)
 
     clearTop();
     cleanUpLeftovers();
-    scanClips();
+    scanClips(true);
 
     while (aptMainLoop())
     {
@@ -1025,7 +1213,7 @@ int main(void)
                 flbClose(&g_player.clip);
                 playing = false;
                 consoleClear();
-                scanClips();
+                scanClips(true);
                 clampList(&ls);
                 ls.previewFor = -1;
                 ls.settle = 0;
@@ -1062,7 +1250,7 @@ int main(void)
                     char name[sizeof(g_clips[0].name)];
                     strcpy(name, g_clips[ls.selected].name);
                     ls.compacting = false;
-                    scanClips();
+                    scanClips(true);
                     selectClip(&ls, name);
                     clampList(&ls);
                     if (result == 1)
@@ -1124,7 +1312,7 @@ int main(void)
                 ls.message = remove(path) == 0 ? NULL : "The clip couldn't be deleted.";
                 ls.messageOk = false;
                 ls.confirmDelete = false;
-                scanClips();
+                scanClips(true);
                 clampList(&ls);
                 ls.previewFor = -1;
                 ls.settle = 0;
@@ -1140,15 +1328,29 @@ int main(void)
         }
         else
         {
+            // Left/Right move along the grid, Up/Down a row (Down from a row
+            // above a shorter last one goes to the last clip). Touching a clip
+            // selects it, and touching the selected one plays it.
             int before = ls.selected;
-            if (repeat & KEY_DUP)
-                ls.selected--;
-            if (repeat & KEY_DDOWN)
-                ls.selected++;
+            bool play = (down & KEY_A) != 0;
             if (repeat & KEY_DLEFT)
-                ls.selected -= LIST_ROWS;
+                ls.selected--;
             if (repeat & KEY_DRIGHT)
-                ls.selected += LIST_ROWS;
+                ls.selected++;
+            if ((repeat & KEY_DUP) && ls.selected >= GRID_COLS)
+                ls.selected -= GRID_COLS;
+            if ((repeat & KEY_DDOWN) && ls.selected / GRID_COLS < (g_clipCount - 1) / GRID_COLS)
+                ls.selected += GRID_COLS;
+            if (down & KEY_TOUCH)
+            {
+                touchPosition touch;
+                hidTouchRead(&touch);
+                int idx = tileAt(&ls, touch.px, touch.py);
+                if (idx >= 0 && idx == before)
+                    play = true;
+                else if (idx >= 0)
+                    ls.selected = idx;
+            }
             clampList(&ls);
             if (ls.selected != before)
             {
@@ -1159,7 +1361,7 @@ int main(void)
 
             if (down & KEY_Y)
             {
-                scanClips();
+                scanClips(false);
                 clampList(&ls);
                 ls.message = NULL;
                 ls.previewFor = -1;
@@ -1192,7 +1394,7 @@ int main(void)
                     dirty = true;
                 }
             }
-            else if ((down & KEY_A) && g_clipCount > 0)
+            else if (play && g_clipCount > 0)
             {
                 // (A damaged clip's details already say why it can't be played.)
                 const Clip *c = &g_clips[ls.selected];
@@ -1219,6 +1421,21 @@ int main(void)
                 showPreview(&ls);
                 dirty = true;
             }
+            // Otherwise read the thumbnail of a clip on screen that hasn't got one
+            // yet: one per pass, so the controls stay responsive.
+            else if (!playing)
+            {
+                for (int i = ls.scroll * GRID_COLS; i < g_clipCount && i < (ls.scroll + GRID_ROWS) * GRID_COLS; i++)
+                {
+                    Clip *c = &g_clips[i];
+                    if (c->thumb == NULL && !c->thumbFailed && c->error == NULL)
+                    {
+                        loadThumb(c);
+                        dirty = true;
+                        break;
+                    }
+                }
+            }
         }
 
         if (!playing && dirty)
@@ -1243,6 +1460,8 @@ int main(void)
         linearFree(g_audioMem);
     if (ls.compacting)
         flbCompactCancel(&g_compactor);
+    for (int i = 0; i < g_clipCount; i++)
+        free(g_clips[i].thumb);
     free(g_frame);
     free(g_clips);
     gfxExit();
