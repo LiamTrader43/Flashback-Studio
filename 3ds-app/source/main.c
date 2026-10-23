@@ -665,8 +665,7 @@ static void drawList(const ListState *ls)
         row(20, C_INFO, "Compact this clip?");
         row(21, C_NORMAL, "%s", c->name);
         row(22, C_NORMAL, "%s -> %s", from, to);
-        wrapRows(23, 26, C_NORMAL, "It's rewritten with just its frame data: the same video, but smaller, "
-                                   "so it copies to a PC faster. B cancels it at any time.");
+        wrapRows(23, 26, C_NORMAL, "Remove empty space between frames. The same video but smaller.");
     }
     else
     {

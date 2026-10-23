@@ -161,11 +161,25 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: all clean
+.PHONY: all clean cia
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+#---------------------------------------------------------------------------------
+# make cia: the app as a CIA, to install with FBI, with banner.png (the wordmark)
+# and banner.wav (silence) as its HOME Menu banner and cia.rsf's settings. Needs
+# bannertool (github.com/carstene1ns/3ds-bannertool) next to makerom in
+# devkitPro's tools/bin, or BANNERTOOL set to it.
+#---------------------------------------------------------------------------------
+BANNERTOOL	?=	bannertool
+
+cia: all
+	@$(BANNERTOOL) makebanner -i banner.png -a banner.wav -o $(BUILD)/banner.bnr
+	@makerom -f cia -o $(TARGET).cia -elf $(TARGET).elf -rsf cia.rsf -icon $(TARGET).smdh \
+		-banner $(BUILD)/banner.bnr -target t -exefslogo
+	@echo built ... $(TARGET).cia
 
 $(BUILD):
 	@mkdir -p $@
@@ -183,7 +197,7 @@ endif
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(GFXBUILD)
+	@rm -fr $(BUILD) $(TARGET).3dsx $(TARGET).cia $(OUTPUT).smdh $(TARGET).elf $(GFXBUILD)
 
 #---------------------------------------------------------------------------------
 $(GFXBUILD)/%.t3x	$(BUILD)/%.h	:	%.t3s
