@@ -48,9 +48,19 @@ Flashback Studio is a homebrew app that lists the clips on your SD card and play
 
 ### Installing it
 
+It comes two ways; use either (or both: they're separate apps).
+
+**As a `.3dsx`, from the Homebrew Launcher:**
+
 1. Get `FlashbackStudio.3dsx` (or build it yourself, see below).
 2. Copy it to the `/3ds/` folder on your SD card.
 3. Start it from the Homebrew Launcher.
+
+**As a `.cia`, on the HOME Menu:**
+
+1. Get `FlashbackStudio.cia` (or build it yourself, see below).
+2. Copy it to your SD card and install it with [FBI](https://github.com/Steveice10/FBI).
+3. Start it from the HOME Menu, like any other app.
 
 ### Using it
 
@@ -118,6 +128,8 @@ Select a clip and press R. The details under the list show how big it will be. C
 ### Building it
 
 Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS tools (devkitARM and libctru), then run `make` in the `3ds-app` folder. It builds `FlashbackStudio.3dsx`.
+
+`make cia` builds `FlashbackStudio.cia` too. It also needs [bannertool](https://github.com/carstene1ns/3ds-bannertool), which devkitPro doesn't include: put `bannertool` in devkitPro's `tools/bin` folder (next to `makerom`), or run `make cia BANNERTOOL=<path to bannertool>`.
 
 The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
 
