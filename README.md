@@ -122,7 +122,7 @@ The new clip is saved next to the original as `<name>-trim.flb` (or `-trim2`, an
 
 ### Compacting clips
 
-A clip is as big as the uncompressed footage (a 60-second full resolution clip with sound is 354 MB), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (that 354 MB clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
+A clip is as big as the uncompressed footage (a 60-second full resolution clip with sound is about 362 MB), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
 
 Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds, and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
 
