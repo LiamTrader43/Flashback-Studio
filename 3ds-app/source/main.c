@@ -964,6 +964,200 @@ static void startTrim(ListState *ls, const char *source, u32 first, u32 frames, 
 }
 
 // ---------------------------------------------------------------------------
+// Reading ahead
+//
+// While a clip plays, a thread reads and decodes the next few frames into
+// buffers of their own, so the player only has to draw them. Reading the SD
+// card then overlaps the drawing and the waiting for the screen instead of
+// adding to them (an Old 3DS couldn't always read, decode and draw a frame in a
+// frame's time, and skipped some), and a slow read is covered by the frames
+// already decoded. The thread has the clip open for itself (the player reads
+// the sound through its own handle), and runs below the player's priority:
+// it uses the time the player spends waiting.
+
+#define AHEAD_BUFS  6       // the frame on screen and the ones after it (0.2 s at 30 fps)
+
+typedef struct Ahead {
+    bool running;
+    FlbClip clip;
+    Thread thread;
+    LightLock lock;             // for everything below
+    LightEvent wake;            // something else is wanted
+    LightEvent done;            // a frame was decoded (or couldn't be read)
+    u32 held[AHEAD_BUFS];       // the entry in each buffer, or UINT32_MAX
+    // Wanted: entry 'want', then the ones after it ('count' in all), going
+    // round from 'last' to 'first' if 'loop' (the part that plays).
+    u32 want, count, first, last;
+    bool loop, quit;
+    u32 failed;                 // an entry that couldn't be read (UINT32_MAX: none)...
+    const char *error;          // ...and why
+    u32 decodeUs;               // the last frame's read + decode time
+} Ahead;
+
+static Ahead g_ahead;
+static u16 *g_aheadBuf[AHEAD_BUFS];     // TOP_W x TOP_H each
+
+// The wanted entry after 'e', or UINT32_MAX if there's none.
+static u32 aheadNext(const Ahead *a, u32 e)
+{
+    if (e == a->last)
+        return a->loop ? a->first : UINT32_MAX;
+    return e + 1 < a->clip.info.entryCount ? e + 1 : UINT32_MAX;
+}
+
+static int aheadFind(const Ahead *a, u32 e)
+{
+    for (int i = 0; i < AHEAD_BUFS; i++)
+        if (a->held[i] == e)
+            return i;
+    return -1;
+}
+
+static bool aheadIsWanted(const Ahead *a, u32 e)
+{
+    u32 w = a->want;
+    for (u32 k = 0; k < a->count && w != UINT32_MAX; k++, w = aheadNext(a, w))
+        if (w == e)
+            return true;
+    return false;
+}
+
+static void aheadThread(void *arg)
+{
+    Ahead *a = (Ahead *)arg;
+    LightLock_Lock(&a->lock);
+    while (!a->quit)
+    {
+        // The first wanted frame that isn't decoded yet (or found damaged),
+        // and a buffer to decode it into: one holding a frame no longer wanted
+        // (there always is one, with at most AHEAD_BUFS wanted).
+        u32 entry = UINT32_MAX, w = a->want;
+        for (u32 k = 0; k < a->count && w != UINT32_MAX; k++, w = aheadNext(a, w))
+            if (w != a->failed && aheadFind(a, w) < 0)
+            {
+                entry = w;
+                break;
+            }
+        int b = -1;
+        for (int i = 0; entry != UINT32_MAX && b < 0 && i < AHEAD_BUFS; i++)
+            if (a->held[i] == UINT32_MAX || !aheadIsWanted(a, a->held[i]))
+                b = i;
+        if (b < 0)
+        {
+            LightLock_Unlock(&a->lock);
+            LightEvent_Wait(&a->wake);
+            LightLock_Lock(&a->lock);
+            continue;
+        }
+
+        a->held[b] = UINT32_MAX;
+        LightLock_Unlock(&a->lock);
+        const char *error = NULL;
+        u64 t0 = svcGetSystemTick();
+        bool ok = flbDecodeEntry(&a->clip, entry, g_aheadBuf[b], &error);
+        u32 us = (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
+        LightLock_Lock(&a->lock);
+        if (ok)
+        {
+            a->held[b] = entry;
+            a->decodeUs = us;
+        }
+        else
+        {
+            a->failed = entry;
+            a->error = error;
+        }
+        LightEvent_Signal(&a->done);
+    }
+    LightLock_Unlock(&a->lock);
+}
+
+// Starts reading ahead in the clip at 'path'. If it can't, the player reads
+// each frame itself when it's needed.
+static void aheadStart(const char *path)
+{
+    Ahead *a = &g_ahead;
+    const char *error;
+    memset(a, 0, sizeof(*a));
+    for (int i = 0; i < AHEAD_BUFS; i++)
+        if (g_aheadBuf[i] == NULL)
+            return;
+    if (!flbOpen(&a->clip, path, &error))
+        return;
+    LightLock_Init(&a->lock);
+    LightEvent_Init(&a->wake, RESET_ONESHOT);
+    LightEvent_Init(&a->done, RESET_ONESHOT);
+    for (int i = 0; i < AHEAD_BUFS; i++)
+        a->held[i] = UINT32_MAX;
+    a->failed = UINT32_MAX;
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    a->thread = threadCreate(aheadThread, a, 32 * 1024, prio < 0x3F ? prio + 1 : prio, -2, false);
+    if (a->thread == NULL)
+    {
+        flbClose(&a->clip);
+        return;
+    }
+    a->running = true;
+}
+
+static void aheadStop(void)
+{
+    Ahead *a = &g_ahead;
+    if (!a->running)
+        return;
+    LightLock_Lock(&a->lock);
+    a->quit = true;
+    LightLock_Unlock(&a->lock);
+    LightEvent_Signal(&a->wake);
+    threadJoin(a->thread, U64_MAX);
+    threadFree(a->thread);
+    flbClose(&a->clip);
+    a->running = false;
+}
+
+// Asks for entry 'entry' and the ones after it, 'count' in all (the part that
+// plays is entries first .. last, going round if 'loop').
+static void aheadWant(u32 entry, u32 count, u32 first, u32 last, bool loop)
+{
+    Ahead *a = &g_ahead;
+    LightLock_Lock(&a->lock);
+    bool changed = a->want != entry || a->count != count || a->first != first || a->last != last || a->loop != loop;
+    a->want = entry;
+    a->count = count;
+    a->first = first;
+    a->last = last;
+    a->loop = loop;
+    LightLock_Unlock(&a->lock);
+    if (changed)
+        LightEvent_Signal(&a->wake);
+}
+
+// Entry 'entry' decoded (the one last asked for with aheadWant), waiting for it
+// if need be; or NULL if it couldn't be read ('error' says why). Its buffer
+// stays as it is until something else is asked for.
+static const u16 *aheadGet(u32 entry, const char **error, u32 *decodeUs)
+{
+    Ahead *a = &g_ahead;
+    LightLock_Lock(&a->lock);
+    for (;;)
+    {
+        int b = aheadFind(a, entry);
+        if (b >= 0 || entry == a->failed)
+        {
+            if (b < 0)
+                *error = a->error;
+            *decodeUs = a->decodeUs;
+            LightLock_Unlock(&a->lock);
+            return b >= 0 ? g_aheadBuf[b] : NULL;
+        }
+        LightLock_Unlock(&a->lock);
+        LightEvent_Wait(&a->done);
+        LightLock_Lock(&a->lock);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Player
 
 static void playerRebase(Player *p)
@@ -1161,6 +1355,7 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
         for (u32 k = 1; k < entry->copies; k++)
             p->missed[(u64)(entry->firstFrame + k) * BAR_W / count] = 1;
     }
+    aheadStart(path);
     playerRebase(p);
     return true;
 }
@@ -1490,16 +1685,29 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
             p->frame = frame;
     }
 
+    // While it plays, the frames after this one are read ahead too (paused,
+    // stepping or scrubbing, just this one).
     u32 entry = flbEntryForFrame(&p->clip, p->frame);
+    if (g_ahead.running && p->error == NULL)
+        aheadWant(entry, p->playing && !p->scrubbing ? AHEAD_BUFS : 1, flbEntryForFrame(&p->clip, lo),
+                  flbEntryForFrame(&p->clip, hi - 1), p->loop);
     if (entry != p->shownEntry && p->error == NULL)
     {
-        u64 t0 = svcGetSystemTick();
-        if (flbDecodeEntry(&p->clip, entry, g_frame, &p->error))
+        const u16 *frame = NULL;
+        if (g_ahead.running)
+            frame = aheadGet(entry, &p->error, &p->decodeUs);
+        else
+        {
+            u64 t0 = svcGetSystemTick();
+            if (flbDecodeEntry(&p->clip, entry, g_frame, &p->error))
+                frame = g_frame;
+            p->decodeUs = (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
+        }
+        if (frame != NULL)
         {
             u64 t1 = svcGetSystemTick();
-            drawTop(g_frame, p->clip.info.width, p->clip.info.height);
+            drawTop(frame, p->clip.info.width, p->clip.info.height);
             u64 t2 = svcGetSystemTick();
-            p->decodeUs = (u32)((t1 - t0) * 1000000 / SYSCLOCK_ARM11);
             p->drawUs = (u32)((t2 - t1) * 1000000 / SYSCLOCK_ARM11);
             if (p->playing && p->shownEntry != UINT32_MAX && entry > p->shownEntry + 1)
                 p->skipped += entry - p->shownEntry - 1;
@@ -1523,6 +1731,8 @@ int main(void)
 
     g_clips = malloc(MAX_CLIPS * sizeof(Clip));
     g_frame = malloc(TOP_W * TOP_H * 2);
+    for (int i = 0; i < AHEAD_BUFS; i++)
+        g_aheadBuf[i] = malloc(TOP_W * TOP_H * 2);
     g_player.loop = true;
 
     g_audioMem = linearAlloc(AUDIO_BUFS * AUDIO_BUF_SAMPLES * 4);
@@ -1562,6 +1772,7 @@ int main(void)
                 u32 trimFrames = p->trimOut + 1 - p->trimIn;
                 u64 trimBytes = p->trimSave ? flbTrimSize(&p->clip, p->trimIn, trimFrames) : 0;
                 audioStop(p);
+                aheadStop();
                 flbClose(&p->clip);
                 playing = false;
                 consoleClear();
@@ -1831,6 +2042,7 @@ int main(void)
     if (playing)
     {
         audioStop(&g_player);
+        aheadStop();
         flbClose(&g_player.clip);
     }
     if (g_ndsp)
@@ -1841,6 +2053,8 @@ int main(void)
         flbCompactCancel(&g_compactor);
     for (int i = 0; i < g_clipCount; i++)
         free(g_clips[i].thumb);
+    for (int i = 0; i < AHEAD_BUFS; i++)
+        free(g_aheadBuf[i]);
     free(g_frame);
     free(g_clips);
     gfxExit();
