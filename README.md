@@ -14,7 +14,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 | Tool | Status | What it does |
 |---|---|---|
 | `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
-| Flashback Studio (3DS app) | First version | Plays clips on the 3DS itself, with sound, and trims, renames and compacts them (to about half their size) |
+| Flashback Studio (3DS app) | Available (`.3dsx` or `.cia`) | Plays clips on the 3DS itself, with sound, and trims, renames and compacts them (to about half their size) |
 
 ## Converting clips to MP4 (Windows)
 
@@ -25,7 +25,7 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 
 ### How to use it
 
-1. Download `convert_flashback.bat` from this repository.
+1. Download `convert_flashback.bat` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest).
 2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC.
 3. Either:
    * **drag** one or more clips onto `convert_flashback.bat`, or
@@ -41,7 +41,7 @@ Clips that already have an MP4 are skipped, so it's safe to run again on the sam
 |---|---|
 | `ffmpeg was not found` | Install ffmpeg and add its `bin` folder to PATH, then open a new window and try again. |
 | `not a Flashback clip (or the copy is incomplete)`, `not a Flashback clip (file too small)` or `the file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
-| `made by a newer Flashback version` | Download the latest `convert_flashback.bat` from this repository. |
+| `made by a newer Flashback version` | Download `convert_flashback.bat` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
 | `... is damaged` or `the clip's frame count doesn't match its index` | The clip file is corrupted. Copy it from the SD card again; if that doesn't help, the recording itself was damaged. |
 | `ffmpeg failed` | ffmpeg's own message is shown just above it. The most common cause is a full disk. |
 | `its .txt is missing` / `couldn't read the resolution or frame rate from its .txt` | Only for older `.raw` clips: copy the `.txt` with the same name from the SD card next to the `.raw`. |
@@ -57,13 +57,13 @@ It comes two ways; use either (or both: they're separate apps).
 
 **As a `.3dsx`, from the Homebrew Launcher:**
 
-1. Get `FlashbackStudio.3dsx` (or build it yourself, see below).
+1. Download `FlashbackStudio.3dsx` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) (or build it yourself, see below).
 2. Copy it to the `/3ds/` folder on your SD card.
 3. Start it from the Homebrew Launcher.
 
 **As a `.cia`, on the HOME Menu:**
 
-1. Get `FlashbackStudio.cia` (or build it yourself, see below).
+1. Download `FlashbackStudio.cia` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) (or build it yourself, see below).
 2. Copy it to your SD card and install it with [FBI](https://github.com/Steveice10/FBI).
 3. Start it from the HOME Menu, like any other app.
 
