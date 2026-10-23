@@ -1,4 +1,9 @@
-<p align="center"><img src="3ds-app/assets/wordmark-2472w.png" alt="Flashback Studio" width="600"></p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="3ds-app/assets/wordmark-dark-2472w.png">
+    <img src="3ds-app/assets/wordmark-2472w.png" alt="Flashback Studio" width="600">
+  </picture>
+</p>
 
 Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last few seconds of gameplay and saves them on a button press.
 
