@@ -57,7 +57,7 @@
 #define BAR_TOUCH_Y0 16
 #define BAR_TOUCH_Y1 56
 
-#define COLOR_PLAYED    ((u16)(RGB8_to_565(80, 200, 255)))
+#define COLOR_PLAYED    ((u16)(RGB8_to_565(204, 26, 31)))    // the logo's red (assets/)
 #define COLOR_REST      ((u16)(RGB8_to_565(60, 60, 60)))
 #define COLOR_HEAD      ((u16)(RGB8_to_565(255, 255, 255)))
 #define COLOR_MISSED    ((u16)(RGB8_to_565(255, 60, 60)))
@@ -67,14 +67,14 @@
 #define COLOR_CUT       ((u16)(RGB8_to_565(20, 20, 20)))     // trimming: the bar outside the selection...
 #define COLOR_MARK      ((u16)(RGB8_to_565(255, 200, 0)))    // ...and its start and end
 
-// Console colors
+// Console colors (the title bar in the logo's red)
 #define C_NORMAL    "\x1b[0m"
-#define C_TITLE     "\x1b[30;46m"
+#define C_TITLE     "\x1b[1;37m\x1b[48;2;204;26;31m"
 #define C_SELECTED  "\x1b[30;47m"
 #define C_DIM       "\x1b[0m\x1b[2m"
 #define C_KEY       "\x1b[1;33m"
 #define C_WARN      "\x1b[1;31m"
-#define C_INFO      "\x1b[1;36m"
+#define C_INFO      "\x1b[1;37m"
 
 typedef struct Clip {
     char name[96];
