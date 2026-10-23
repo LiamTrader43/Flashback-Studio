@@ -27,6 +27,13 @@ AccessControlInfo:
     - DirectSdmc
     - DirectSdmcWrite
   IoAccessControl:
+  # The DSP's shared memory (NDSP plays the clips' sound through it) and VRAM,
+  # mapped like any app's: without them, starting the sound crashes.
+  IORegisterMapping:
+    - 1ff50000-1ff57fff
+    - 1ff70000-1ff77fff
+  MemoryMapping:
+    - 1f000000-1f5fffff:r
   MemoryType              : Application
   SystemMode              : 64MB
   IdealProcessor          : 0
