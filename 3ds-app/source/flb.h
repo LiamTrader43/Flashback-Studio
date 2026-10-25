@@ -3,7 +3,7 @@
 //
 // Version 1 is what the recorder saves: its ring buffer file, renamed, with an
 // index and trailer appended. The layout is documented next to
-// flashbackSaveClipFile in Luma3DS-Flashback's sysmodules/rosalina/source/flashback.c;
+// flashbackSaveClipFile in Luma3DS-Flashback's sysmodules/rosalina/source/flashback_clip.c;
 // keep this reader in step with it:
 //
 //   [ring slots]  slot i at offset i * slotStride: a compressed frame, or the

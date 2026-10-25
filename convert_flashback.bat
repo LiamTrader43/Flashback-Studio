@@ -41,7 +41,7 @@ using System.Diagnostics;
 using System.Text;
 
 // Reader for Flashback clip files (.flb). Version 1, as recorded, is documented
-// next to flashbackSaveClipFile in sysmodules/rosalina/source/flashback.c of
+// next to flashbackSaveClipFile in sysmodules/rosalina/source/flashback_clip.c of
 // Luma3DS-Flashback (https://github.com/LiamTrader43/Luma3DS-Flashback):
 //   [ring slots]  slot i at offset i * slotStride: a compressed frame, or the
 //                 raw frame if its stored size is slotBytes
@@ -83,7 +83,7 @@ public static class FlashbackClip
     }
 
     // The recorder's frame compression, QOI-style ops on RGB565 pixels (see
-    // flashbackCompress in Luma3DS-Flashback's flashback.c).
+    // flashbackCompress in Luma3DS-Flashback's flashback_compress.c).
     static bool Unpack(byte[] src, int len, ushort[] dst, int pixels)
     {
         ushort[] index = new ushort[64];
