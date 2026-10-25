@@ -1,23 +1,43 @@
-# Flashback Studio's PC test
+# Flashback Studio's PC tests
 
-This tests the player's read-ahead thread on a PC. The thread is the "Reading
-ahead" section of `3ds-app/source/main.c`. Run the test after changing that
-section:
+These test the app's own code on a PC: the clip reader and compactor
+(`3ds-app/source/flb.c`), and the player's read-ahead thread (the "Reading
+ahead" section of `3ds-app/source/main.c`). Run them after changing either:
 
 ```
 python run_tests.py --cc "C:/Program Files/JetBrains/CLion 2025.2.4/bin/mingw/bin/gcc.exe"
 ```
 
-It takes about a minute and a half. If the test failed, it exits with 1.
+They take about a minute and a half, and the runner lists which passed. If any
+failed, it exits with 1.
 
 - `--cc`: the C compiler. The default is `gcc`. On Windows, use a MinGW gcc,
   such as CLion's or MSYS2's.
 
-You need Python 3 and a C compiler for the PC with pthreads.
+You need Python 3 and a C compiler for the PC with pthreads. Everything is
+built in `build/`, which git ignores.
 
-The runner copies the section, unchanged, into `build/ahead_extracted.c`
-(which git ignores). The copy runs from the section's divider line up to the
-Player section's. `ahead_test.c` includes it, with pthreads standing in for
+## Clip reader and compactor test
+
+`flb_test.c` builds `flb.c` as it is (it's plain C and stdio). It writes small
+clips the way the recorder saves them, and varies them:
+- with and without sound;
+- with and without inputs;
+- with copies of missed frames.
+
+Then it compacts each clip, and trims it from the start, from the end, and at
+random, sometimes part way through a frame's copies. It trims both the recorded
+clip and the compacted one. Every frame of every copy must show the same
+picture and the same inputs as in the original.
+
+It also damages a clip's inputs in several ways, and the clip must still open
+and play, without them.
+
+## Read-ahead test
+
+The runner copies the "Reading ahead" section, unchanged, into
+`build/ahead_extracted.c`. The copy runs from the section's divider line up to
+the Player section's. `ahead_test.c` includes it, with pthreads standing in for
 libctru, and a stand-in decoder that takes a random while.
 
 A simulated player then uses the clip at random. It plays (sometimes skipping a

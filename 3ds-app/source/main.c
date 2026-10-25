@@ -103,6 +103,11 @@ typedef struct Player {
     u8 missed[BAR_W];       // bar pixels covering missed (copied) frames
     const char *error;
     bool showStats;
+    bool showInputs;        // the input display (for clips with inputs)
+    bool inputsShown;       // the input display is on screen...
+    u32 inputsFrame;        // ...showing this frame's inputs
+    bool settingsOpen;      // the Settings menu is open (X)...
+    u32 settingsItem;       // ...and the setting selected in it
     u32 decodeUs, drawUs;   // last frame's read + decode, and drawing, times...
     u32 textUs;             // ...and the bottom screen's
     u32 skipped;            // stored frames passed over without being shown
@@ -251,8 +256,11 @@ static void formatResolution(const FlbInfo *info, char *out, size_t size)
 // ---------------------------------------------------------------------------
 // Top screen
 
+static u16 *g_topShown;     // the top screen's framebuffer on screen (the last one presented)
+
 static void presentTop(void)
 {
+    g_topShown = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
     gfxFlushBuffers();
     gfxScreenSwapBuffers(GFX_TOP, false);
 }
@@ -265,9 +273,8 @@ static void clearTop(void)
 }
 
 // The framebuffer is the screen rotated: pixel (x, y) is fb[x * 240 + 239 - y].
-static void drawTop(const u16 *src, u32 w, u32 h)
+static void drawTopFrame(u16 *fb, const u16 *src, u32 w, u32 h)
 {
-    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
     u32 scale = (w * 2 <= TOP_W && h * 2 <= TOP_H) ? 2 : 1;
     u32 ox = (TOP_W - w * scale) / 2, oy = (TOP_H - h * scale) / 2;
 
@@ -301,7 +308,115 @@ static void drawTop(const u16 *src, u32 w, u32 h)
                 *c-- = *s;
         }
     }
+}
+
+static void drawTop(const u16 *src, u32 w, u32 h)
+{
+    drawTopFrame((u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL), src, w, h);
     presentTop();
+}
+
+// The input display: a small picture of the controls in the top screen's
+// bottom left corner, over the clip (darkened under it), with what was held
+// during the frame on screen in the logo's red. For clips recorded with their
+// inputs (see flb.h); Settings turns it on and off.
+#define PAD_W       128
+#define PAD_H       62
+#define PAD_X       6       // where it is on the top screen
+#define PAD_Y       (TOP_H - PAD_H - 6)
+#define COLOR_PAD_IDLE  ((u16)(RGB8_to_565(85, 85, 85)))
+#define COLOR_PAD_LINE  ((u16)(RGB8_to_565(150, 150, 150)))
+#define COLOR_PAD_ON    COLOR_PLAYED
+
+static u16 g_padUnder[PAD_W * PAD_H];   // the clip's pixels under it (to draw it again over the same frame)
+
+static inline u16 *padAt(u16 *fb, int x, int y)
+{
+    return fb + (PAD_X + x) * TOP_H + (TOP_H - 1 - (PAD_Y + y));
+}
+
+static void padRect(u16 *fb, int x0, int y0, int x1, int y1, u16 color)
+{
+    for (int x = x0; x < x1; x++)
+        for (int y = y0; y < y1; y++)
+            *padAt(fb, x, y) = color;
+}
+
+// A disc of radius r (with 'ring', just its edge).
+static void padCircle(u16 *fb, int cx, int cy, int r, bool ring, u16 color)
+{
+    for (int dx = -r; dx <= r; dx++)
+        for (int dy = -r; dy <= r; dy++)
+        {
+            int d = dx * dx + dy * dy;
+            if (d <= r * r + r && (!ring || d > (r - 1) * (r - 1) + r - 1))
+                *padAt(fb, cx + dx, cy + dy) = color;
+        }
+}
+
+// Keeps the clip's pixels where the input display goes (as just drawn), or
+// puts them back. A column of it is one run of pixels, from its bottom row up.
+static void padSaveUnder(u16 *fb)
+{
+    for (int x = 0; x < PAD_W; x++)
+        memcpy(g_padUnder + x * PAD_H, padAt(fb, x, PAD_H - 1), PAD_H * 2);
+}
+
+static void padRestoreUnder(u16 *fb)
+{
+    for (int x = 0; x < PAD_W; x++)
+        memcpy(padAt(fb, x, PAD_H - 1), g_padUnder + x * PAD_H, PAD_H * 2);
+}
+
+static void drawInputs(u16 *fb, const FlbInput *in)
+{
+    // The clip under it at half brightness (each channel halved).
+    for (int x = 0; x < PAD_W; x++)
+    {
+        u16 *c = padAt(fb, x, PAD_H - 1);
+        for (int i = 0; i < PAD_H; i++)
+            c[i] = (c[i] >> 1) & 0x7BEF;
+    }
+
+    u32 b = in->buttons;
+#define PAD_KEY(keys) ((b & (keys)) ? COLOR_PAD_ON : COLOR_PAD_IDLE)
+    padRect(fb, 4, 2, 34, 7, PAD_KEY(KEY_L));
+    padRect(fb, 94, 2, 124, 7, PAD_KEY(KEY_R));
+
+    // The Circle Pad: its range, and where it was (red once HID counts it as a direction).
+    int kx = in->circleX * 8 / 156, ky = in->circleY * 8 / 156;
+    kx = kx < -8 ? -8 : kx > 8 ? 8 : kx;
+    ky = ky < -8 ? -8 : ky > 8 ? 8 : ky;
+    padCircle(fb, 20, 23, 11, true, COLOR_PAD_LINE);
+    padCircle(fb, 20 + kx, 23 - ky, 3, false,
+              (b & (KEY_CPAD_UP | KEY_CPAD_DOWN | KEY_CPAD_LEFT | KEY_CPAD_RIGHT)) ? COLOR_PAD_ON : COLOR_PAD_LINE);
+
+    // The D-Pad.
+    padRect(fb, 17, 38, 24, 45, PAD_KEY(KEY_DUP));
+    padRect(fb, 17, 51, 24, 58, PAD_KEY(KEY_DDOWN));
+    padRect(fb, 10, 45, 17, 51, PAD_KEY(KEY_DLEFT));
+    padRect(fb, 24, 45, 31, 51, PAD_KEY(KEY_DRIGHT));
+    padRect(fb, 17, 45, 24, 51, COLOR_PAD_IDLE);
+
+    // The touch screen (320 x 240, at a tenth), and where it was touched.
+    padRect(fb, 47, 15, 81, 16, COLOR_PAD_LINE);
+    padRect(fb, 47, 40, 81, 41, COLOR_PAD_LINE);
+    padRect(fb, 47, 15, 48, 41, COLOR_PAD_LINE);
+    padRect(fb, 80, 15, 81, 41, COLOR_PAD_LINE);
+    if (b & KEY_TOUCH)
+    {
+        int tx = 48 + in->touchX * 32 / 320, ty = 16 + in->touchY * 24 / 240;
+        padCircle(fb, tx < 50 ? 50 : tx > 78 ? 78 : tx, ty < 18 ? 18 : ty > 38 ? 38 : ty, 2, false, COLOR_PAD_ON);
+    }
+
+    padRect(fb, 48, 48, 62, 52, PAD_KEY(KEY_SELECT));
+    padRect(fb, 66, 48, 80, 52, PAD_KEY(KEY_START));
+
+    padCircle(fb, 108, 23, 5, false, PAD_KEY(KEY_X));
+    padCircle(fb, 97, 34, 5, false, PAD_KEY(KEY_Y));
+    padCircle(fb, 119, 34, 5, false, PAD_KEY(KEY_A));
+    padCircle(fb, 108, 45, 5, false, PAD_KEY(KEY_B));
+#undef PAD_KEY
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,10 +1434,11 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
 {
     char path[160];
     snprintf(path, sizeof(path), CLIP_DIR "%s", c->name);
-    bool loop = p->loop, showStats = p->showStats;
+    bool loop = p->loop, showStats = p->showStats, showInputs = p->showInputs;
     memset(p, 0, sizeof(*p));
     p->loop = loop;
     p->showStats = showStats;
+    p->showInputs = showInputs;
     if (!flbOpen(&p->clip, path, error))
         return false;
 
@@ -1357,6 +1473,62 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
     aheadStart(path);
     playerRebase(p);
     return true;
+}
+
+// The input display over the top screen 'fb', for the frame on screen (if
+// it's on and the clip has inputs).
+static void playerDrawInputs(Player *p, u16 *fb)
+{
+    p->inputsShown = p->showInputs && p->clip.inputs != NULL;
+    p->inputsFrame = p->frame;
+    if (p->inputsShown)
+        drawInputs(fb, &p->clip.inputs[p->frame]);
+}
+
+// Shows a decoded frame of the clip, with the input display over it.
+static void playerDrawTop(Player *p, const u16 *frame)
+{
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+    drawTopFrame(fb, frame, p->clip.info.width, p->clip.info.height);
+    padSaveUnder(fb);
+    playerDrawInputs(p, fb);
+    presentTop();
+}
+
+// Whether the input display on screen is out of date while the same stored
+// frame stays up: a copy of it with other inputs, or the display turned on or off.
+static bool playerInputsStale(const Player *p)
+{
+    bool want = p->showInputs && p->clip.inputs != NULL;
+    if (want != p->inputsShown)
+        return true;
+    return want && p->frame != p->inputsFrame &&
+           memcmp(&p->clip.inputs[p->frame], &p->clip.inputs[p->inputsFrame], sizeof(FlbInput)) != 0;
+}
+
+// Draws the input display again over the frame on screen: the screen copied
+// to the other framebuffer, the clip's pixels put back under the display, and
+// the display drawn for the frame now on screen.
+static void playerRedrawInputs(Player *p)
+{
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+    memcpy(fb, g_topShown, TOP_W * TOP_H * 2);
+    padRestoreUnder(fb);
+    playerDrawInputs(p, fb);
+    presentTop();
+}
+
+// The Settings menu (X while a clip plays).
+enum { SETTING_LOOP, SETTING_INPUTS, SETTING_TIMING, SETTING_COUNT };
+
+static void playerToggleSetting(Player *p, u32 item)
+{
+    if (item == SETTING_LOOP)
+        p->loop = !p->loop;
+    else if (item == SETTING_INPUTS)
+        p->showInputs = !p->showInputs;
+    else
+        p->showStats = !p->showStats;
 }
 
 // The bar pixel showing clip frame 'frame'.
@@ -1455,11 +1627,11 @@ static void drawPlayerStatic(const Player *p)
         row(21, C_NORMAL, " Left/Right Previous / next frame");
         row(22, C_NORMAL, " L/R        Back / forward 1 second");
         row(23, C_NORMAL, " Up/Down    Speed");
-        row(24, C_NORMAL, " Y          Loop on/off");
-        row(25, C_NORMAL, " X          Show/hide timing");
-        row(26, C_NORMAL, " Touch the bar to jump");
-        row(27, C_NORMAL, " B          Back to the clip list");
-        row(28, C_NORMAL, " SELECT     Trim");
+        row(24, C_NORMAL, " X          Settings (loop, inputs, ...)");
+        row(25, C_NORMAL, " Touch the bar to jump");
+        row(26, C_NORMAL, " B          Back to the clip list");
+        row(27, C_NORMAL, " SELECT     Trim");
+        row(28, C_NORMAL, "");
     }
 }
 
@@ -1538,6 +1710,21 @@ static void drawPlayer(const Player *p)
         playerRow(14, C_NORMAL, "");
         playerRow(15, C_NORMAL, "");
     }
+
+    // The Settings menu, over the controls while it's open.
+    if (p->settingsOpen)
+    {
+        static const char *const names[SETTING_COUNT] = { "Loop", "Input display", "Timing details" };
+        bool on[SETTING_COUNT] = { p->loop, p->showInputs, p->showStats };
+        playerRow(20, C_INFO, " Settings");
+        for (u32 i = 0; i < SETTING_COUNT; i++)
+            playerRow(21 + i, i == p->settingsItem ? C_SELECTED : C_NORMAL, " %-14s %-3s%s", names[i],
+                      on[i] ? "on" : "off", i == SETTING_INPUTS && p->clip.inputs == NULL ? " (none in this clip)" : "");
+        playerRow(24, C_NORMAL, "");
+        playerRow(25, C_DIM, " Up/Down: choose  A: change  X/B: close");
+        for (int r = 26; r <= 28; r++)
+            playerRow(r, C_NORMAL, "");
+    }
 }
 
 // One frame of the player. Returns false when it should close (with trimSave
@@ -1557,6 +1744,23 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
         if (down & (KEY_B | KEY_X))
             p->trimConfirm = false;
         return true;
+    }
+
+    // The Settings menu takes the buttons while it's open; the clip plays on.
+    if (p->settingsOpen)
+    {
+        if (repeat & KEY_DUP)
+            p->settingsItem = (p->settingsItem + SETTING_COUNT - 1) % SETTING_COUNT;
+        if (repeat & KEY_DDOWN)
+            p->settingsItem = (p->settingsItem + 1) % SETTING_COUNT;
+        if (down & (KEY_A | KEY_DLEFT | KEY_DRIGHT))
+            playerToggleSetting(p, p->settingsItem);
+        if (down & (KEY_B | KEY_X))
+        {
+            p->settingsOpen = false;
+            drawPlayerStatic(p);
+        }
+        down = repeat = 0;
     }
 
     // SELECT starts and stops trimming (B stops it too, rather than leaving).
@@ -1624,6 +1828,8 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
                 p->playing = false;
             }
         }
+        if (down & KEY_Y)
+            p->loop = !p->loop;
         lo = p->trimIn;
         hi = p->trimOut + 1;
     }
@@ -1644,10 +1850,8 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
             playerRebase(p);
         }
         if (down & KEY_X)
-            p->showStats = !p->showStats;
+            p->settingsOpen = true;
     }
-    if (down & KEY_Y)
-        p->loop = !p->loop;
     p->scrubbing = false;
     if (!(held & KEY_TOUCH))
         p->touchWait = false;
@@ -1705,7 +1909,7 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
         if (frame != NULL)
         {
             u64 t1 = svcGetSystemTick();
-            drawTop(frame, p->clip.info.width, p->clip.info.height);
+            playerDrawTop(p, frame);
             u64 t2 = svcGetSystemTick();
             p->drawUs = (u32)((t2 - t1) * 1000000 / SYSCLOCK_ARM11);
             if (p->playing && p->shownEntry != UINT32_MAX && entry > p->shownEntry + 1)
@@ -1715,6 +1919,8 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
         else
             p->playing = false;
     }
+    else if (p->error == NULL && p->shownEntry != UINT32_MAX && playerInputsStale(p))
+        playerRedrawInputs(p);
     return true;
 }
 
@@ -1733,6 +1939,7 @@ int main(void)
     for (int i = 0; i < AHEAD_BUFS; i++)
         g_aheadBuf[i] = malloc(TOP_W * TOP_H * 2);
     g_player.loop = true;
+    g_player.showInputs = true;
 
     g_audioMem = linearAlloc(AUDIO_BUFS * AUDIO_BUF_SAMPLES * 4);
     g_ndsp = g_audioMem != NULL && R_SUCCEEDED(ndspInit());

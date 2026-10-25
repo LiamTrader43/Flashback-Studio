@@ -1,5 +1,5 @@
-"""Runs Flashback Studio's PC test (see README.md) against 3ds-app/source/main.c.
-Exits with 1 if it failed.
+"""Runs Flashback Studio's PC tests (see README.md) against 3ds-app/source, and
+says which passed. Exits with 1 if any failed.
 
 usage: python run_tests.py [--cc COMPILER]
   --cc  a C compiler for this PC (default: gcc); on Windows, a MinGW gcc
@@ -12,7 +12,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAIN_C = os.path.normpath(os.path.join(HERE, '..', '3ds-app', 'source', 'main.c'))
+SOURCE = os.path.normpath(os.path.join(HERE, '..', '3ds-app', 'source'))
+MAIN_C = os.path.join(SOURCE, 'main.c')
 BUILD = os.path.join(HERE, 'build')
 EXE = '.exe' if platform.system() == 'Windows' else ''
 
@@ -26,29 +27,45 @@ def extract_ahead():
     open(os.path.join(BUILD, 'ahead_extracted.c'), 'w', encoding='utf-8').write(src[start:end])
 
 
+def build_and_run(cc, name, sources, flags=(), libs=()):
+    """Builds a test and runs it in build/; returns whether it passed."""
+    exe = os.path.join(BUILD, name + EXE)
+    p = subprocess.run([cc, '-O2', *flags, '-o', exe, *sources, *libs],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if p.returncode != 0:
+        print(p.stdout.rstrip() or f'{cc} failed, with no output')
+        return False
+    return subprocess.run([exe], cwd=BUILD).returncode == 0
+
+
 def main():
-    ap = argparse.ArgumentParser(description='Runs Flashback Studio\'s PC test.')
+    ap = argparse.ArgumentParser(description='Runs Flashback Studio\'s PC tests.')
     ap.add_argument('--cc', default='gcc')
     args = ap.parse_args()
     cc = shutil.which(args.cc)
     if cc is None:
         sys.exit(f'No C compiler "{args.cc}" found: pass one with --cc (see README.md).')
     # (A MinGW gcc needs its own folder on the PATH to find its DLLs, and so
-    # does the program it builds.)
+    # do the programs it builds.)
     os.environ['PATH'] = os.path.dirname(cc) + os.pathsep + os.environ.get('PATH', '')
     os.makedirs(BUILD, exist_ok=True)
 
+    results = []
+    print('=== clip reader and compactor test', flush=True)
+    results.append(('clip reader and compactor test',
+                    build_and_run(cc, 'flb_test', [os.path.join(HERE, 'flb_test.c'), os.path.join(SOURCE, 'flb.c')],
+                                  ['-I', SOURCE])))
+    print('\n=== read-ahead test', flush=True)
     extract_ahead()
-    exe = os.path.join(BUILD, 'ahead_test' + EXE)
-    p = subprocess.run([cc, '-O2', '-I', BUILD, '-o', exe, os.path.join(HERE, 'ahead_test.c'), '-lpthread'],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if p.returncode != 0:
-        print(p.stdout.rstrip() or f'{cc} failed, with no output')
-        print('read-ahead test: FAILED (it didn\'t build)')
-        sys.exit(1)
-    ok = subprocess.run([exe]).returncode == 0
-    print(f'read-ahead test: {"passed" if ok else "FAILED"}')
-    sys.exit(0 if ok else 1)
+    results.append(('read-ahead test', build_and_run(cc, 'ahead_test', [os.path.join(HERE, 'ahead_test.c')],
+                                                     ['-I', BUILD], ['-lpthread'])))
+
+    print('\n=== summary')
+    for name, ok in results:
+        print(f'  {"passed" if ok else "FAILED"}  {name}')
+    failed = [n for n, ok in results if not ok]
+    print('all passed' if not failed else f'{len(failed)} FAILED')
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == '__main__':

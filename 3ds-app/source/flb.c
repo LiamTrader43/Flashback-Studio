@@ -9,6 +9,10 @@
 #define FLB_VERSION_COMPACT  2
 #define FLB_VERSION_AUDIO    3
 #define FLB_AUDIO_INFO_SIZE  32
+#define FLB_INPUT_MAGIC      0x49424C46  // "FLBI"
+#define FLB_INPUT_VERSION    1
+#define FLB_INPUT_HEADER_SIZE 16
+#define FLB_INPUT_RECORD_SIZE 16    // (what's written; reading takes any size from 16 up)
 
 // A compacted or trimmed copy is written in blocks of this many bytes, each at
 // a multiple of it in the file (the last one is shorter): every SD write has a
@@ -25,12 +29,23 @@ static uint32_t flbU32(const uint8_t *p)
     return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static uint16_t flbU16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | (p[1] << 8));
+}
+
 static void flbPut32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)v;
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
+}
+
+static void flbPut16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
 }
 
 static uint32_t flbEntrySize(const FlbInfo *info)
@@ -41,6 +56,13 @@ static uint32_t flbEntrySize(const FlbInfo *info)
 static uint32_t flbAudioInfoSize(const FlbInfo *info)
 {
     return info->version == FLB_VERSION_AUDIO ? FLB_AUDIO_INFO_SIZE : 0;
+}
+
+// The size of the inputs of 'frames' frames of the clip, header included (0
+// if it has none).
+static uint32_t flbInputsSize(const FlbClip *clip, uint32_t frames)
+{
+    return clip->inputs != NULL ? FLB_INPUT_HEADER_SIZE + frames * FLB_INPUT_RECORD_SIZE : 0;
 }
 
 bool flbIsCompacted(const FlbInfo *info)
@@ -108,6 +130,7 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
     info->entryCount = flbU32(t + 28);
     info->frameCount = flbU32(t + 32);
     info->indexOffset = flbU32(t + 36);
+    info->inputOffset = flbU32(t + 40);
     info->fileSize = (uint64_t)length;
 
     if (info->width == 0 || info->height == 0 || info->width > 400 || info->height > 240 ||
@@ -147,6 +170,55 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
         }
     }
     return true;
+}
+
+// Loads the clip's inputs, if it has any and they read back sound (see flb.h).
+// A clip whose inputs can't be read plays without them.
+static void flbReadInputs(FlbClip *clip)
+{
+    FlbInfo *info = &clip->info;
+    uint8_t h[FLB_INPUT_HEADER_SIZE];
+    uint32_t count = 0, size = 0;
+    uint8_t *raw = NULL;
+
+    bool ok = info->inputOffset != 0 && (uint64_t)info->inputOffset + sizeof(h) <= info->indexOffset &&
+              fseek(clip->file, (long)info->inputOffset, SEEK_SET) == 0 && fread(h, 1, sizeof(h), clip->file) == sizeof(h);
+    if (ok)
+    {
+        count = flbU32(h + 8);
+        size = flbU32(h + 12);
+        ok = flbU32(h) == FLB_INPUT_MAGIC && flbU32(h + 4) == FLB_INPUT_VERSION && count == info->frameCount &&
+             size >= FLB_INPUT_RECORD_SIZE && size <= 256 &&
+             (uint64_t)info->inputOffset + sizeof(h) + (uint64_t)count * size <= info->indexOffset;
+    }
+    if (ok)
+    {
+        raw = malloc((size_t)count * size);
+        clip->inputs = malloc((size_t)count * sizeof(FlbInput));
+        ok = raw != NULL && clip->inputs != NULL && fread(raw, size, count, clip->file) == count;
+    }
+    if (ok)
+    {
+        for (uint32_t i = 0; i < count; i++)
+        {
+            const uint8_t *p = raw + (size_t)i * size;
+            FlbInput *in = &clip->inputs[i];
+            in->buttons = flbU32(p);
+            in->circleX = (int16_t)flbU16(p + 4);
+            in->circleY = (int16_t)flbU16(p + 6);
+            in->touchX = flbU16(p + 8);
+            in->touchY = flbU16(p + 10);
+            in->cstickX = (int16_t)flbU16(p + 12);
+            in->cstickY = (int16_t)flbU16(p + 14);
+        }
+    }
+    else
+    {
+        free(clip->inputs);
+        clip->inputs = NULL;
+        info->inputOffset = 0;      // (as good as none)
+    }
+    free(raw);
 }
 
 bool flbOpen(FlbClip *clip, const char *path, const char **error)
@@ -211,6 +283,7 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         *error = "the clip's frame count doesn't match its index";
         goto fail;
     }
+    flbReadInputs(clip);
     return true;
 
 fail:
@@ -224,6 +297,7 @@ void flbClose(FlbClip *clip)
         fclose(clip->file);
     free(clip->entries);
     free(clip->stored);
+    free(clip->inputs);
     memset(clip, 0, sizeof(*clip));
 }
 
@@ -326,7 +400,8 @@ uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCou
     const FlbInfo *info = &clip->info;
     uint32_t first, end;
     flbEntryRange(clip, firstFrame, frameCount, &first, &end);
-    uint64_t size = (uint64_t)(end - first) * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE;
+    uint64_t size = (uint64_t)(end - first) * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE +
+                    flbInputsSize(clip, frameCount);
     for (uint32_t e = first; e < end; e++)
         size += clip->entries[e].size;
     if (info->hasAudio)
@@ -407,7 +482,7 @@ static bool flbCopyBegin(FlbCompactor *c, const char *path, const char *outPath,
     }
     uint64_t size = flbTrimSize(&c->clip, firstFrame, frameCount);
     c->total = size - (uint64_t)(c->endEntry - c->firstEntry) * flbEntrySize(info) -
-               flbAudioInfoSize(info) - FLB_TRAILER_SIZE;
+               flbAudioInfoSize(info) - FLB_TRAILER_SIZE - flbInputsSize(&c->clip, frameCount);
     c->buf = malloc(FLB_COMPACT_BUFFER);
     c->offsets = malloc((size_t)(c->endEntry - c->firstEntry) * sizeof(uint32_t));
     if (c->buf == NULL || c->offsets == NULL)
@@ -488,22 +563,48 @@ static bool flbCompactPut(FlbCompactor *c, const uint8_t *src, uint32_t len)
     return true;
 }
 
-// Writes the index (audio info) and trailer, checks the copy reads back, then
-// makes it the clip. Compacting swaps it in for the clip: the clip is renamed
-// out of the way first, so there's always a whole clip on the SD card (see
+// Writes the inputs of the frames copied (if the clip has inputs), the index
+// (audio info) and trailer, checks the copy reads back, then makes it the clip.
+// Compacting swaps it in for the clip: the clip is renamed out of the way
+// first, so there's always a whole clip on the SD card (see
 // flbCleanUpLeftover). Trimming gives it its own name.
 static bool flbCompactFinish(FlbCompactor *c, const char **error)
 {
     const FlbInfo *info = &c->clip.info;
     uint32_t entries = c->endEntry - c->firstEntry;
     uint32_t entrySize = flbEntrySize(info);
+    uint32_t inputSize = flbInputsSize(&c->clip, c->frameCount);
     uint32_t indexSize = entries * entrySize + flbAudioInfoSize(info);
-    uint8_t *index = malloc(indexSize + FLB_TRAILER_SIZE);
-    if (index == NULL)
+    uint8_t *tail = malloc(inputSize + indexSize + FLB_TRAILER_SIZE);
+    if (tail == NULL)
     {
         *error = "not enough memory to copy this clip";
         return false;
     }
+
+    uint32_t inputOffset = 0;
+    if (inputSize != 0)
+    {
+        inputOffset = (uint32_t)c->copied;
+        flbPut32(tail, FLB_INPUT_MAGIC);
+        flbPut32(tail + 4, FLB_INPUT_VERSION);
+        flbPut32(tail + 8, c->frameCount);
+        flbPut32(tail + 12, FLB_INPUT_RECORD_SIZE);
+        for (uint32_t f = 0; f < c->frameCount; f++)
+        {
+            const FlbInput *in = &c->clip.inputs[c->firstFrame + f];
+            uint8_t *p = tail + FLB_INPUT_HEADER_SIZE + f * FLB_INPUT_RECORD_SIZE;
+            flbPut32(p, in->buttons);
+            flbPut16(p + 4, (uint16_t)in->circleX);
+            flbPut16(p + 6, (uint16_t)in->circleY);
+            flbPut16(p + 8, in->touchX);
+            flbPut16(p + 10, in->touchY);
+            flbPut16(p + 12, (uint16_t)in->cstickX);
+            flbPut16(p + 14, (uint16_t)in->cstickY);
+        }
+    }
+
+    uint8_t *index = tail + inputSize;
     for (uint32_t i = 0; i < entries; i++)
     {
         uint32_t e = c->firstEntry + i;
@@ -545,10 +646,12 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     flbPut32(t + 24, info->slotBytes);
     flbPut32(t + 28, entries);
     flbPut32(t + 32, c->frameCount);
-    flbPut32(t + 36, (uint32_t)c->copied);
+    flbPut32(t + 36, (uint32_t)(c->copied + inputSize));
+    flbPut32(t + 40, inputOffset);
 
-    bool ok = flbCompactPut(c, index, indexSize + FLB_TRAILER_SIZE) && flbCompactFlush(c);
-    free(index);
+    bool ok = flbCompactPut(c, tail, inputSize + indexSize + FLB_TRAILER_SIZE) && flbCompactFlush(c);
+    free(tail);
+    c->copied += inputSize;
     ok = fclose(c->out) == 0 && ok;
     c->out = NULL;
     if (!ok)
@@ -557,12 +660,13 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
         return false;
     }
 
-    // Check the copy reads back as a whole clip before it's used.
+    // Check the copy reads back as a whole clip before it's used (its inputs too).
     FlbClip check;
     if (!flbOpen(&check, c->tmpPath, error))
         return false;
     ok = check.info.frameCount == c->frameCount && check.info.entryCount == entries &&
-         check.info.fileSize == c->copied + indexSize + FLB_TRAILER_SIZE;
+         check.info.fileSize == c->copied + indexSize + FLB_TRAILER_SIZE &&
+         (check.inputs != NULL) == (inputSize != 0);
     flbClose(&check);
     if (!ok)
     {

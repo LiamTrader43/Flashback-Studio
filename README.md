@@ -89,11 +89,20 @@ The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first:
 | Left/Right | Previous/next frame (pauses; hold to repeat) |
 | L/R | Back/forward 1 second |
 | Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
-| Y | Loop on/off |
-| X | Show/hide timing (how long each frame takes to read and draw, and how close the sound is to the picture) |
+| X | Settings (see below) |
 | Touch the bar | Jump to that point |
 | SELECT | Trim (see below) |
 | B | Back to the clip list |
+
+X opens the player's settings on the bottom screen, while the clip carries on playing. Choose one with Up/Down, change it with A (or Left/Right), and close them with X or B. They stay as you left them until you exit the app.
+
+| Setting | |
+|---|---|
+| Loop | Play the clip again from the start when it ends |
+| Input display | Show what was pressed (see below) |
+| Timing details | How long each frame takes to read and draw, and how close the sound is to the picture |
+
+**Input display.** Clips recorded since Flashback records the inputs show them in the top screen's bottom-left corner, over the picture. It shows the buttons held during each frame in red (a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Clips recorded before then have no inputs to show.
 
 Red marks under the progress bar show where the recorder missed frames (they're filled with copies of the frame before, so the clip plays at the right speed). On a missed frame, the player says so.
 
@@ -101,11 +110,11 @@ Clips recorded with audio play their sound at normal speed. It's muted while pau
 
 While a clip plays, the app reads and decodes the next few frames ahead of time, so a slow moment reading the SD card doesn't hold up the picture.
 
-**If playback stutters,** check that Flashback recording is off (Rosalina menu > Flashback recorder). While it's on, it records the app too, and its SD card writes compete with the app reading the clip. X shows how long each frame takes to read and draw, and how many frames were skipped to keep up.
+**If playback stutters,** check that Flashback recording is off (Rosalina menu > Flashback recorder). While it's on, it records the app too, and its SD card writes compete with the app reading the clip. Timing details (in the settings, X) shows how long each frame takes to read and draw, and how many frames were skipped to keep up.
 
 ### Trimming clips
 
-Trimming saves part of a clip as a new clip, with its sound; the original is kept. Press SELECT in the clip list (or while a clip plays), find where the part you want starts and press L, then where it ends and press R. The part that will be cut off is darkened on the bar, and the selection plays (and loops) on its own so you can check it. Press X to save it.
+Trimming saves part of a clip as a new clip, with its sound and inputs; the original is kept. Press SELECT in the clip list (or while a clip plays), find where the part you want starts and press L, then where it ends and press R. The part that will be cut off is darkened on the bar, and the selection plays (and loops) on its own so you can check it. Press X to save it.
 
 | Trimming | |
 |---|---|
@@ -128,7 +137,7 @@ Select a clip and press R. The details under the list show how big it will be. C
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
-* **Compacted clips** play in the app and convert with `convert_flashback.bat` like any other clip, sound included (only the sound the clip's frames last is kept). Use the latest `convert_flashback.bat`: older copies don't know compacted clips.
+* **Compacted clips** play in the app and convert with `convert_flashback.bat` like any other clip, sound and inputs included (only the sound the clip's frames last is kept). Use the latest `convert_flashback.bat`: older copies don't know compacted clips.
 
 ### Building it
 
@@ -138,7 +147,7 @@ Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS too
 
 The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
 
-[`tests/`](tests) has a PC test of the player's read-ahead, which runs the app's own code: `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
+[`tests/`](tests) has PC tests that run the app's own code: the clip reader and compactor, and the player's read-ahead. Run them with `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
 
 ## The `.flb` clip format
 
@@ -147,7 +156,8 @@ A `.flb` clip saved by Flashback is its recording buffer saved as-is, which is w
 * **Sound** (when the clip was recorded with audio): stereo 16-bit at the 3DS's 32,728 Hz, at the start of the file.
 * **Frames:** RGB565, top row first, each in a fixed-size slot, compressed losslessly with a small QOI-style format (or stored as-is when compression wouldn't make it smaller).
 * **Index:** the clip's frames in order, with how many times each one repeats (missed frames are filled with copies of the previous one so clips play at the right speed) and, with sound, where each frame starts in it.
-* **Trailer:** the last 48 bytes, starting with the magic `FLBK` and holding the format version, resolution, frame rate and frame count. With sound, 32 bytes describing it come just before.
+* **Inputs** (in clips recorded since Flashback records them): the buttons held during each frame, and where the Circle Pad and the touch screen were. They come just before the index, and readers that don't know them skip them.
+* **Trailer:** the last 48 bytes, starting with the magic `FLBK` and holding the format version, resolution, frame rate, frame count and where the index and inputs start. With sound, 32 bytes describing it come just before.
 
 The trailer's version number belongs to the file format. It isn't the version of Flashback or of this app:
 

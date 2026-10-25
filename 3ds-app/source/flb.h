@@ -33,6 +33,16 @@
 //                 samples first .. end - 1 are held
 //   [trailer]     as in version 1, with version 3 (slotStride 0 if compacted)
 //
+// Clips recorded since Flashback records the inputs also have them, in any
+// version, just before the index (readers that don't know them find the index
+// from the trailer, and skip them):
+//
+//   [inputs]      a 16-byte header { "FLBI", u32 version (1), u32 count (=
+//                 frameCount), u32 recordSize (16) }, then count records of
+//                 FlbInput: the inputs during each frame of the clip, copies
+//                 included. The trailer's word 10 (bytes 40-43) is where the
+//                 header starts, or 0 if there are none.
+//
 // All values little-endian. Frames are RGB565, top row first. Every frame is
 // compressed on its own, so any frame can be decoded without the ones before it.
 //
@@ -59,7 +69,18 @@ typedef struct FlbInfo {
     bool hasAudio;
     uint32_t audioRateMhz;  // sample rate in millihertz
     uint32_t audioOffset, audioCapacity, audioFirst, audioEnd, audioMissed;
+    uint32_t inputOffset;   // where the inputs start, as the trailer says (0: none)
 } FlbInfo;
+
+// The inputs during a frame: the buttons held at any time during it (the 3DS's
+// KEY_* bits, with KEY_TOUCH for the touch screen), and where the Circle Pad
+// and the touch screen were.
+typedef struct FlbInput {
+    uint32_t buttons;
+    int16_t circleX, circleY;   // about -156 to 156, up and right positive
+    uint16_t touchX, touchY;    // (with KEY_TOUCH)
+    int16_t cstickX, cstickY;   // the C-Stick (not recorded yet: 0)
+} FlbInput;
 
 typedef struct FlbEntry {
     uint32_t offset, size, copies;  // where the stored frame is in the file, its size, times shown
@@ -72,15 +93,17 @@ typedef struct FlbClip {
     FlbInfo info;
     FlbEntry *entries;
     uint8_t *stored;        // one stored frame, as read from the file
+    FlbInput *inputs;       // the inputs during each frame (frameCount of them), or NULL if the clip has none
 } FlbClip;
 
 // Reads and checks a clip's trailer. On failure returns false and points
 // 'error' at a message.
 bool flbReadInfo(FILE *file, FlbInfo *info, const char **error);
 
-// Opens a clip and loads its index (the frames themselves are read by
-// flbDecodeEntry). On failure returns false, points 'error' at a message
-// (valid until the next call) and leaves nothing open.
+// Opens a clip and loads its index and inputs (the frames themselves are read
+// by flbDecodeEntry). On failure returns false, points 'error' at a message
+// (valid until the next call) and leaves nothing open. Inputs that can't be
+// read leave the clip without them, rather than failing it.
 bool flbOpen(FlbClip *clip, const char *path, const char **error);
 void flbClose(FlbClip *clip);
 
@@ -113,11 +136,12 @@ uint64_t flbCompactSize(const FlbClip *clip);
 // trimmed (as a compacted clip).
 uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount);
 
-// Compacting and trimming: the clip's frames (all of them, or the ones kept)
-// and their audio are copied into "<copy>.tmp", a few at a time (so the caller
-// can show progress), which then replaces the clip (compacting) or becomes a
-// new clip (trimming). The clip itself is only touched at the very end of a
-// compaction, and is left as it was if anything fails or it's cancelled.
+// Compacting and trimming: the clip's frames (all of them, or the ones kept),
+// their audio and their inputs are copied into "<copy>.tmp", a few at a time
+// (so the caller can show progress), which then replaces the clip (compacting)
+// or becomes a new clip (trimming). The clip itself is only touched at the very
+// end of a compaction, and is left as it was if anything fails or it's
+// cancelled.
 typedef struct FlbCompactor {
     FlbClip clip;
     FILE *out;
