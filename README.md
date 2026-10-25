@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last few seconds of gameplay and saves them on a button press.
+Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last 10 seconds to 2 minutes of gameplay and saves them on a button press.
 
 `.flb` clips use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. **Use the converter here to turn them into normal videos.**
 
@@ -122,9 +122,9 @@ The new clip is saved next to the original as `<name>-trim.flb` (or `-trim2`, an
 
 ### Compacting clips
 
-A clip is as big as the uncompressed footage (a 60-second full resolution clip with sound is about 362 MB), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
+A clip is as big as the uncompressed footage (at full resolution with sound, about 362 MB for 60 seconds and 724 MB for 2 minutes), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
 
-Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds, and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
+Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds (a 2-minute one about twice as long), and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
@@ -138,17 +138,28 @@ Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS too
 
 The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
 
+[`tests/`](tests) has a PC test of the player's read-ahead, which runs the app's own code: `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
+
 ## The `.flb` clip format
 
-A `.flb` file saved by Flashback (version 1) is its recording buffer saved as-is, which is why the 3DS can save a clip in a few seconds whatever its length:
+A `.flb` clip saved by Flashback is its recording buffer saved as-is, which is why the 3DS can save a clip in a few seconds whatever its length:
 
+* **Sound** (when the clip was recorded with audio): stereo 16-bit at the 3DS's 32,728 Hz, at the start of the file.
 * **Frames:** RGB565, top row first, each in a fixed-size slot, compressed losslessly with a small QOI-style format (or stored as-is when compression wouldn't make it smaller).
-* **Index:** the clip's frames in order, with how many times each one repeats (missed frames are filled with copies of the previous one so clips play at the right speed).
-* **Trailer:** the last 48 bytes, starting with the magic `FLBK` and holding the version, resolution, frame rate and frame count.
+* **Index:** the clip's frames in order, with how many times each one repeats (missed frames are filled with copies of the previous one so clips play at the right speed) and, with sound, where each frame starts in it.
+* **Trailer:** the last 48 bytes, starting with the magic `FLBK` and holding the format version, resolution, frame rate and frame count. With sound, 32 bytes describing it come just before.
 
-Version 1 is documented next to `flashbackSaveClipFile` in [`sysmodules/rosalina/source/flashback_clip.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_clip.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress` in [`flashback_compress.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_compress.c); the decoders in the converter and the 3DS app follow those descriptions.
+The trailer's version number belongs to the file format. It isn't the version of Flashback or of this app:
 
-A compacted clip (version 2) has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot. A clip with audio (version 3, recorded or compacted) also holds the sound, stereo 16-bit at the 3DS's 32,728 Hz, and each frame's position in it. All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h).
+| Format version | Clip |
+|---|---|
+| 1 | Recorded without audio |
+| 2 | Compacted, without audio |
+| 3 | With audio, recorded or compacted |
+
+A compacted clip has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot.
+
+The recorded clip format is documented in [`sysmodules/rosalina/source/flashback_clip.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_clip.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress` in [`flashback_compress.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_compress.c). All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h); the decoders in the converter and the 3DS app follow those descriptions.
 
 ## License
 
