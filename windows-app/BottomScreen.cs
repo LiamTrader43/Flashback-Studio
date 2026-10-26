@@ -49,6 +49,39 @@ namespace FlashbackStudio
         public static bool Bold(Style s) => s == Style.Title || s == Style.Key || s == Style.Warn || s == Style.Info;
     }
 
+    // A dropdown's list (a ContextMenuStrip), in the buttons' colours: grey,
+    // lighter under the mouse, and the chosen one (its item Checked) red.
+    sealed class DropdownRenderer : ToolStripProfessionalRenderer
+    {
+        public DropdownRenderer() : base(new Colors())
+        {
+            RoundedEdges = false;
+        }
+
+        protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+        {
+            bool chosen = e.Item is ToolStripMenuItem item && item.Checked;
+            Color face = chosen ? (e.Item.Selected ? Theme.RedHover : Theme.Red) : e.Item.Selected ? Theme.ButtonHover : Theme.Button;
+            using (Brush b = new SolidBrush(face))
+                e.Graphics.FillRectangle(b, new Rectangle(Point.Empty, e.Item.Size));
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = Color.White;
+            base.OnRenderItemText(e);
+        }
+
+        sealed class Colors : ProfessionalColorTable
+        {
+            public override Color ToolStripDropDownBackground => Theme.Button;
+            public override Color ImageMarginGradientBegin => Theme.Button;
+            public override Color ImageMarginGradientMiddle => Theme.Button;
+            public override Color ImageMarginGradientEnd => Theme.Button;
+            public override Color MenuBorder => Theme.ButtonHover;
+        }
+    }
+
     // The "bottom screen": text in rows and columns, like the 3DS app's console,
     // with pictures and bars drawn among it. What's on it is drawn by whoever
     // handles PaintScreen, through a Painter, which also says what can be

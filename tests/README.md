@@ -96,7 +96,10 @@ So a change to `flb.c`'s compacting or to the input display needs the same
 change in the Windows app.
 
 With ffmpeg on the PATH, it also exports clips with sound and inputs, without
-them, and a trimmed part. Every frame of the MP4 must show the right picture,
-with the input display if asked, and the sound must last as long as the frames.
-Stopping part way, and a clip that turns out damaged part way, must leave the
-MP4 that was there as it was, and nothing else behind.
+them, and a trimmed part, at twice their size with sharp pixels (scaled by the
+app), and at other sizes and scalings (scaled by a second ffmpeg). Every frame
+of the MP4 must show the right picture (for ffmpeg's scaling, the picture as
+ffmpeg scales it on its own, with its colour at half the size, as H.264 keeps
+it), with the input display if asked, and the sound must last as long as the
+frames. Stopping part way, and a clip that turns out damaged part way, both
+ways, must leave the MP4 that was there as it was, and nothing else behind.

@@ -649,9 +649,23 @@ static class WindowsAppTest
     // Each entry of a clip, copies included.
     static int[] EntryOfFrame(Spec s) => s.Copies.SelectMany((copies, e) => Enumerable.Repeat(e, copies)).ToArray();
 
+    // A picture (w x h, BGR) scaled to dw x dh by ffmpeg, with its scale
+    // filter's 'flags', as the export does; then, as the MP4 has it, with its
+    // colour at half the size each way (H.264's 4:2:0). (Scaled smoothly, these
+    // tests' colourful noise pictures have fine colour that 4:2:0 loses: to
+    // about 24 dB at twice the size. Left in, it would hide the encoding's
+    // own loss, which is what the frames are compared for.)
+    static byte[] FfmpegScale(string ffmpeg, byte[] picture, int w, int h, int dw, int dh, string flags)
+    {
+        File.WriteAllBytes("picture.raw", picture);
+        return Run(ffmpeg, $"-v error -f rawvideo -pixel_format bgr24 -video_size {w}x{h} -i picture.raw " +
+                           $"-vf scale={dw}:{dh}:flags={flags},format=yuv420p -f rawvideo -pix_fmt bgr24 -").Out;
+    }
+
     // Converts 'clip' and checks the MP4's frames and sound.
     // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed part.)
-    static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0)
+    static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0,
+                                ExportSize videoSize = ExportSize.Double, ExportScaling scaling = ExportScaling.Nearest)
     {
         checks++;
         string mp4 = Path.ChangeExtension(clip, ".mp4");
@@ -660,7 +674,7 @@ static class WindowsAppTest
         try
         {
             using (FlbClip c = FlbClip.Open(clip))
-                Converter.ToMp4(c, first, frames, mp4, inputs, ffmpeg, _ => { }, CancellationToken.None);
+                Converter.ToMp4(c, first, frames, mp4, inputs, videoSize, scaling, ffmpeg, _ => { }, CancellationToken.None);
         }
         catch (Exception x)
         {
@@ -668,22 +682,28 @@ static class WindowsAppTest
             return;
         }
 
-        int w = s.Width * 2, h = s.Height * 2, size = w * h * 3;
+        (int w, int h) = Converter.VideoSize(s.Width, s.Height, videoSize);
+        int size = w * h * 3;
         byte[] video = Run(ffmpeg, $"-v error -i \"{mp4}\" -f rawvideo -pix_fmt bgr24 -").Out;
         if (video.Length != frames * size)
         {
             Fail($"{what}: {video.Length / size} frames, want {frames}");
             return;
         }
-        // Each frame must be the right picture (at twice the size, with the
-        // input display if asked): like it, and less like the frames of the
-        // other entries.
+        // Each frame must be the right picture (at twice the size, or scaled by
+        // ffmpeg as asked, with the input display over it if asked): like it,
+        // and less like the frames of the other entries.
         int[] entryOf = EntryOfFrame(s);
         InputOverlay overlay = inputs && s.Inputs ? new InputOverlay(w, h) : null;
-        byte[][] expected = new byte[s.Frames][];
+        byte[][] pictures = new byte[s.Copies.Length][], expected = new byte[s.Frames][];
+        for (int e = 0; e < s.Copies.Length; e++)
+            pictures[e] = videoSize == ExportSize.Double && scaling == ExportScaling.Nearest
+                ? Bgr((x, y) => PixelOf(e, x / 2, y / 2), w, h)
+                : FfmpegScale(ffmpeg, Bgr((x, y) => PixelOf(e, x, y), s.Width, s.Height), s.Width, s.Height, w, h,
+                              Converter.ScaleFlags[(int)scaling]);
         for (int f = 0; f < s.Frames; f++)
         {
-            expected[f] = Bgr((x, y) => PixelOf(entryOf[f], x / 2, y / 2), w, h);
+            expected[f] = (byte[])pictures[entryOf[f]].Clone();
             overlay?.Draw(expected[f], InputOf(f));
         }
         double worst = 99;
@@ -727,18 +747,23 @@ static class WindowsAppTest
         Write("plain.flb", plain);
         CheckConversion("compacted, without sound or inputs", ffmpeg, "plain.flb", plain, true);
         CheckConversion("a trimmed part (frames 2-9)", ffmpeg, "big.flb", s, true, 2, 8);
+        // Scaled by ffmpeg, which the frames come back from for the input display.
+        CheckConversion("1800x1080, bicubic", ffmpeg, "big.flb", s, true, videoSize: ExportSize.P1080, scaling: ExportScaling.Bicubic);
+        CheckConversion("800x480, lanczos, a trimmed part", ffmpeg, "big.flb", s, true, 3, 9, scaling: ExportScaling.Lanczos);
+        CheckConversion("2400x1440, nearest, compacted", ffmpeg, "plain.flb", plain, true, videoSize: ExportSize.P1440);
 
-        // Stopping, and a clip that turns out damaged part way: the MP4 that was
-        // there is left as it was, and nothing else is left behind.
+        // Stopping, and a clip that turns out damaged part way (scaled here, and
+        // by ffmpeg): the MP4 that was there is left as it was, and nothing else
+        // is left behind.
         string[] before = Leftovers(".");
         File.WriteAllText("big.mp4", "the old MP4");
-        void Stopped(string what, string clip, CancellationToken cancel, string message)
+        void Stopped(string what, string clip, CancellationToken cancel, string message, ExportScaling scaling = ExportScaling.Nearest)
         {
             checks++;
             try
             {
                 using (FlbClip c = FlbClip.Open(clip))
-                    Converter.ToMp4(c, "big.mp4", true, ffmpeg, _ => { }, cancel);
+                    Converter.ToMp4(c, "big.mp4", true, ExportSize.Double, scaling, ffmpeg, _ => { }, cancel);
                 Fail($"{what}: finished");
             }
             catch (Exception x)
@@ -754,9 +779,11 @@ static class WindowsAppTest
         CancellationTokenSource stop = new CancellationTokenSource();
         stop.Cancel();
         Stopped("stopped", "big.flb", stop.Token, null);
+        Stopped("stopped, scaled by ffmpeg", "big.flb", stop.Token, null, ExportScaling.Bilinear);
         long index = Write("damaged.flb", s);
         Patch32("damaged.flb", index + 3 * 16 + 4, Stored(s, 3).Length - 1);
         Stopped("damaged part way", "damaged.flb", CancellationToken.None, "frame 3 is damaged");
+        Stopped("damaged part way, scaled by ffmpeg", "damaged.flb", CancellationToken.None, "frame 3 is damaged", ExportScaling.Spline);
     }
 
     static int Main(string[] args)

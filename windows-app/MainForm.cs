@@ -42,6 +42,8 @@ namespace FlashbackStudio
 
         // Exporting
         bool exportInputs = true, exportReplace;
+        ExportSize exportSize;          // the video's size...
+        ExportScaling exportScaling;    // ...and how it's scaled up to it, remembered
         string exportFolder;            // where exports go (null: next to their clips), remembered
         int exportFirst, exportCount;   // the frames to export (all of them, or a trimmed part)...
         string exportPath;              // ...of this clip
@@ -209,7 +211,8 @@ namespace FlashbackStudio
                 OpenFolder(StartFolder(last), null);
         }
 
-        // ---- What's remembered: the folder opened last, the volume, where exports go, and the window
+        // ---- What's remembered: the folder opened last, the volume, where exports go, their size and
+        // scaling, and the window
 
         static string SettingsFile =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "settings.txt");
@@ -232,6 +235,11 @@ namespace FlashbackStudio
                         exportFolder = value.Length > 0 ? value : null;
                     else if (name == "volume" && int.TryParse(value, out int v))
                         volume = Math.Max(0, Math.Min(100, v));
+                    else if (name == "size" && Enum.TryParse(value, out ExportSize size) && Enum.IsDefined(typeof(ExportSize), size))
+                        exportSize = size;
+                    else if (name == "scaling" && Enum.TryParse(value, out ExportScaling scaling) &&
+                             Enum.IsDefined(typeof(ExportScaling), scaling))
+                        exportScaling = scaling;
                     else if (name == "window")
                     {
                         // x, y, width, height, and 1 if it was maximized
@@ -257,6 +265,7 @@ namespace FlashbackStudio
                 // (The window's size when it isn't maximized or minimized, and whether it's maximized.)
                 Rectangle w = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
                 File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder,
+                                                         "size=" + exportSize, "scaling=" + exportScaling,
                                                          $"window={w.X},{w.Y},{w.Width},{w.Height},{(WindowState == FormWindowState.Maximized ? 1 : 0)}" });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -469,6 +478,42 @@ namespace FlashbackStudio
             return col + label.Length + 2;
         }
 
+        // A dropdown in a line of text, at row r, column col: a button 'width'
+        // columns wide saying 'label' (what's chosen), which opens a list of
+        // 'options' under it (the chosen one red) to pick another. Returns the
+        // column after it.
+        int Dropdown(Painter p, int r, int col, int width, string label, string[] options, int chosen, Action<int> choose)
+        {
+            Rectangle at = p.Cells(r, col, width);
+            Rectangle box = new Rectangle(at.X, at.Y + S(1), at.Width, at.Height - S(2));
+            p.Button(box, label + " ▾", () => ShowDropdown(box, options, chosen, choose));
+            return col + width;
+        }
+
+        void ShowDropdown(Rectangle under, string[] options, int chosen, Action<int> choose)
+        {
+            ContextMenuStrip menu = new ContextMenuStrip
+            {
+                Renderer = new DropdownRenderer(),
+                ShowImageMargin = false,
+                Font = bottom.Label,
+                MinimumSize = new Size(under.Width, 0),
+            };
+            for (int i = 0; i < options.Length; i++)
+            {
+                int pick = i;
+                ToolStripMenuItem item = new ToolStripMenuItem(options[i]) { Checked = i == chosen };
+                item.Click += (s, e) =>
+                {
+                    choose(pick);
+                    bottom.Invalidate();
+                };
+                menu.Items.Add(item);
+            }
+            menu.Closed += (s, e) => BeginInvoke((Action)menu.Dispose);     // (after its item's Click)
+            menu.Show(bottom, new Point(under.Left, under.Bottom));
+        }
+
         void PaintList(Painter p)
         {
             int first = scroll * GridCols, last = Math.Min(clips.Count, first + GridRows * GridCols);
@@ -531,8 +576,9 @@ namespace FlashbackStudio
                     exportNameBox.Bounds = Rectangle.Inflate(p.Cells(d + 1, 8, BottomScreen.Cols - 13), 0, -1);
                     p.Text(d + 1, BottomScreen.Cols - 4, Style.Dim, ".mp4");
                     PaintExportFolder(p, d + 2, "next to the clip");
-                    p.Text(d + 3, 1, Style.Normal, $"{c.Width * 2}x{c.Height * 2}, {Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")}");
+                    PaintVideoChoices(p, d + 3, c);
                     PaintInputsChoice(p, d + 4, c.HasInputs);
+                    p.Right(d + 4, Style.Normal, $"{Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")} ");
                     string problem = ExportProblem();
                     if (problem != null)
                         p.Wrap(d + 5, d + 6, Style.Warn, problem, 1);
@@ -547,15 +593,16 @@ namespace FlashbackStudio
                     p.Text(d, 1, Style.Info, $"Export all {ok} clip{(ok == 1 ? "" : "s")} as MP4s?");
                     PaintExportFolder(p, d + 1, "next to each clip");
                     p.Text(d + 2, 1, Style.Dim, "Each MP4 is named after its clip.");
-                    PaintInputsChoice(p, d + 3, true);
+                    PaintVideoChoices(p, d + 3, null);
+                    PaintInputsChoice(p, d + 4, true);
                     string problem = ExportFolderProblem();
                     if (problem != null)
-                        p.Wrap(d + 4, d + 5, Style.Warn, problem, 1);
+                        p.Wrap(d + 5, d + 6, Style.Warn, problem, 1);
                     else if (have > 0)
                     {
                         string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4 there: ";
-                        p.Text(d + 4, 1, Style.Normal, text);
-                        Choice(p, d + 4, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
+                        p.Text(d + 5, 1, Style.Normal, text);
+                        Choice(p, d + 5, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
                     }
                     Answers(p, "Export", problem == null ? Export : (Action)null, Cancel);
                     return;
@@ -611,6 +658,35 @@ namespace FlashbackStudio
             }
             else
                 Buttons(p, 0, false, ("Open folder", ChooseFolder), ("Refresh", RefreshList));
+        }
+
+        static readonly string[] ScalingNames = { "Nearest", "Bilinear", "Bicubic", "Lanczos", "Spline" };
+
+        // The video's size and how it's scaled up: two dropdowns. (Twice the size
+        // is clip 'c''s, or if it's null, any clip's.)
+        void PaintVideoChoices(Painter p, int r, ClipInfo c)
+        {
+            string twice = c != null ? $"{c.Width * 2}x{c.Height * 2}" : "2x";
+            string[] sizes = { twice, "1080p", "1440p", "4K" };
+            string[] items = new string[sizes.Length];
+            items[0] = c != null ? twice + " (2x)" : "2x the clip's size";
+            for (int i = 1; i < sizes.Length; i++)
+            {
+                (int w, int h) = Converter.VideoSize(400, 240, (ExportSize)i);
+                items[i] = $"{sizes[i]} ({w}x{h})";
+            }
+            p.Text(r, 1, Style.Normal, "Size:");
+            int col = Dropdown(p, r, 7, 11, sizes[(int)exportSize], items, (int)exportSize, i =>
+            {
+                exportSize = (ExportSize)i;
+                SaveSettings();
+            });
+            p.Text(r, col + 2, Style.Normal, "Scaling:");
+            Dropdown(p, r, col + 11, 12, ScalingNames[(int)exportScaling], ScalingNames, (int)exportScaling, i =>
+            {
+                exportScaling = (ExportScaling)i;
+                SaveSettings();
+            });
         }
 
         void PaintInputsChoice(Painter p, int r, bool any)
@@ -1035,6 +1111,8 @@ namespace FlashbackStudio
         {
             string ffmpeg = Converter.FindFfmpeg();
             bool inputs = exportInputs;
+            ExportSize size = exportSize;
+            ExportScaling scaling = exportScaling;
             if (mode == Mode.ConfirmExport)
             {
                 string path = exportPath, mp4 = ExportMp4(), name = Path.GetFileName(mp4);
@@ -1046,7 +1124,7 @@ namespace FlashbackStudio
                     try
                     {
                         using (FlbClip clip = FlbClip.Open(path))
-                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, ffmpeg,
+                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, size, scaling, ffmpeg,
                                             done => Progress((double)done / count, $"Frame {done} of {count}"), token);
                     }
                     catch (OperationCanceledException)
@@ -1083,7 +1161,7 @@ namespace FlashbackStudio
                     try
                     {
                         using (FlbClip clip = FlbClip.Open(c.Path))
-                            Converter.ToMp4(clip, TargetMp4(c), inputs, ffmpeg,
+                            Converter.ToMp4(clip, TargetMp4(c), inputs, size, scaling, ffmpeg,
                                             done => Progress((before + done) / (double)total, $"Frame {done} of {c.FrameCount}"), token);
                         exported++;
                     }

@@ -55,12 +55,14 @@ Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, 
 
 ### Exporting MP4s
 
-**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 is H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 is H.264 video at the size you choose (see **Size** and **Scaling** below), at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
 
 Before it starts, it asks:
 
 * **Name** (exporting one clip or a selection): type the MP4's name. It starts as the clip's (`clip_<date>`, or `<name>-trim` for a selection). If there's already an MP4 with that name in the folder, it says it will be replaced.
 * **Folder:** where the MP4s go. To start with, that's next to the clips. **Change…** picks another folder, which is remembered for next time, and **Reset** goes back to next to the clips.
+* **Size** (a dropdown): **800x480** to start with, twice the clip's size (400x240 for a half resolution clip), or **1080p** (1800x1080), **1440p** (2400x1440) or **4K** (3600x2160), keeping the 3DS screen's shape.
+* **Scaling** (a dropdown): how the picture is scaled up to that size, with ffmpeg's scaler. **Nearest** (to start with) keeps sharp, unblurred pixels, as exports always had (at 1080p, which isn't a whole number of times the 3DS screen, some pixels come out a little wider than others). **Bilinear**, **bicubic**, **lanczos** and **spline** smooth them instead, from the softest (bilinear) to the sharpest (lanczos and spline). Either way, the input display is drawn after the scaling, so it stays sharp. Bigger sizes take longer: on a 12-core PC, a 20-second clip takes about 2 seconds at 800x480, 7 at 1080p, 12 at 1440p and 40 at 4K. The size and scaling are remembered for next time.
 * **Input display** (click **on**/**off** to change it; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
 * **Exporting every clip:** each MP4 is named after its clip. Clips that already have an MP4 in the folder are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
 
