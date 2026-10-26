@@ -48,6 +48,7 @@ namespace FlashbackStudio
         // The player, and its settings (kept until the app closes, as on the 3DS)
         Player player;
         bool loop = true, showInputs = true, showStats;
+        int volume = 100;               // playback's (0 to 100; exports are as recorded), remembered
         bool askSave;                   // asking whether to save the selection
         long panelShown;                // when the player's bottom screen was last drawn (Stopwatch ticks)
         bool fineTimer;                 // timeBeginPeriod(1) is on
@@ -170,30 +171,59 @@ namespace FlashbackStudio
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
+            LoadSettings(out string last);
             if (startPath != null)
                 OpenPath(startPath);
             else
-                OpenFolder(StartFolder(), null);
+                OpenFolder(StartFolder(last), null);
         }
 
-        // ---- The clip folder
+        // ---- What's remembered: the folder opened last, and the volume
 
         static string SettingsFile =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "folder.txt");
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "settings.txt");
 
-        // The folder to start with: the last one opened, or else an SD card's
-        // /luma/flashback/ (a 3DS SD card in the PC).
-        static string StartFolder()
+        // (A line "name=value" each.)
+        void LoadSettings(out string lastFolder)
         {
+            lastFolder = null;
             try
             {
-                string last = File.ReadAllText(SettingsFile).Trim();
-                if (Directory.Exists(last))
-                    return last;
+                foreach (string line in File.ReadAllLines(SettingsFile))
+                {
+                    int eq = line.IndexOf('=');
+                    string name = eq > 0 ? line.Substring(0, eq) : "", value = eq > 0 ? line.Substring(eq + 1).Trim() : "";
+                    if (name == "folder")
+                        lastFolder = value;
+                    else if (name == "volume" && int.TryParse(value, out int v))
+                        volume = Math.Max(0, Math.Min(100, v));
+                }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
             {
             }
+        }
+
+        void SaveSettings()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile));
+                File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume });
+            }
+            catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
+            {
+            }
+        }
+
+        // ---- The clip folder
+
+        // The folder to start with: the last one opened, or else an SD card's
+        // /luma/flashback/ (a 3DS SD card in the PC).
+        static string StartFolder(string last)
+        {
+            if (last != null && Directory.Exists(last))
+                return last;
             foreach (DriveInfo d in DriveInfo.GetDrives())
             {
                 try
@@ -237,16 +267,7 @@ namespace FlashbackStudio
             selected = scroll = 0;
             Rescan(false, select);
             if (folder != null)
-            {
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile));
-                    File.WriteAllText(SettingsFile, folder);
-                }
-                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
-                {
-                }
-            }
+                SaveSettings();
         }
 
         void ChooseFolder()
@@ -1056,7 +1077,7 @@ namespace FlashbackStudio
                 return;     // (a damaged clip's details already say why it can't be played)
             try
             {
-                player = new Player(c.Path, loop, showInputs, showStats);
+                player = new Player(c.Path, loop, showInputs, showStats) { Volume = volume };
             }
             catch (InvalidDataException e)
             {
@@ -1311,11 +1332,44 @@ namespace FlashbackStudio
                     if (pl.TrimMode)
                         AskSave();
                     break;
+                case Keys.Oemplus:                  // (+ is Shift and = on most keyboards; either will do)
+                case Keys.Oemplus | Keys.Shift:
+                case Keys.Add:
+                    SetVolume(volume + 10);
+                    break;
+                case Keys.OemMinus:
+                case Keys.Subtract:
+                    SetVolume(volume - 10);
+                    break;
                 default:
                     return false;
             }
             PlayerChanged();
             return true;
+        }
+
+        // Playback's volume (0 to 100): the player's sound only, as exports are
+        // as recorded. Remembered for next time.
+        void SetVolume(int percent, bool remember = true)
+        {
+            volume = Math.Max(0, Math.Min(100, percent));
+            if (player != null)
+                player.Volume = volume;
+            if (remember)
+                SaveSettings();
+            bottom.Invalidate();
+        }
+
+        // The volume slider, in the progress bar's colours: dragging along it
+        // (or clicking it) sets the volume.
+        void PaintVolume(Painter p, Rectangle bar)
+        {
+            int at = (int)((long)volume * (bar.Width - 1) / 100), grow = Math.Max(3, S(3)), knob = Math.Max(3, S(3));
+            p.Fill(new Rectangle(bar.X, bar.Y, at + 1, bar.Height), Theme.Red);
+            p.Fill(new Rectangle(bar.X + at + 1, bar.Y, bar.Width - at - 1, bar.Height), Theme.Rest);
+            p.Fill(new Rectangle(bar.X + at - knob / 2, bar.Y - grow, knob, bar.Height + 2 * grow), Theme.Head);
+            p.Draggable(new Rectangle(bar.X - S(4), bar.Y - p.RowH / 2, bar.Width + S(8), bar.Height + p.RowH),
+                        (along, done) => SetVolume((int)Math.Round(along * 100), done));
         }
 
         // The bar pixel showing clip frame 'frame', for a bar 'width' wide.
@@ -1430,14 +1484,21 @@ namespace FlashbackStudio
             else
                 p.Text(9, 1, Style.Dim, "Sound: muted");
 
+            // The volume: drag along it, or +/-.
+            Style sound = clip.HasAudio ? Style.Normal : Style.Dim;
+            p.Text(10, 1, sound, "Volume");
+            Rectangle slider = p.Cells(10, 9, 24);
+            PaintVolume(p, new Rectangle(slider.X, slider.Y + slider.Height * 3 / 8, slider.Width, Math.Max(4, slider.Height / 4)));
+            p.Text(10, 34, sound, $"{volume}%");
+
             if (pl.Error != null)
-                p.Wrap(10, 12, Style.Warn, pl.Error, 1);
+                p.Wrap(11, 13, Style.Warn, pl.Error, 1);
             else if (pl.ShowStats)
             {
-                p.Text(10, 1, Style.Dim, $"Read+decode {pl.DecodeMs:0.0}  draw {pl.DrawMs:0.0} ms");
-                p.Text(11, 1, Style.Dim, $"Frames skipped to keep up: {pl.Skipped}");
+                p.Text(11, 1, Style.Dim, $"Read+decode {pl.DecodeMs:0.0}  draw {pl.DrawMs:0.0} ms");
+                p.Text(12, 1, Style.Dim, $"Frames skipped to keep up: {pl.Skipped}");
                 if (pl.AudioOn)
-                    p.Text(12, 1, Style.Dim, $"Sound vs picture: {pl.AudioOffsetMs:+0;-0;0} ms");
+                    p.Text(13, 1, Style.Dim, $"Sound vs picture: {pl.AudioOffsetMs:+0;-0;0} ms");
             }
 
             if (pl.TrimMode)
@@ -1487,6 +1548,7 @@ namespace FlashbackStudio
                 Help(p, r++, "Enter", "Save it as a new clip", AskSave);
                 Help(p, r++, "E", "Export it as an MP4", ExportFromPlayer);
                 Help(p, r++, "L", "Loop on/off", ToggleLoop);
+                Help(p, r++, "+/-", "Volume up / down", () => SetVolume(volume + 10), () => SetVolume(volume - 10));
                 Help(p, r++, "", "Click the bar to jump");
                 Help(p, r++, "T/Esc", "Stop trimming", pl.ToggleTrim, pl.ToggleTrim);
             }
@@ -1496,6 +1558,7 @@ namespace FlashbackStudio
                 Help(p, r++, "Left/Right", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
                 Help(p, r++, "PgUp/PgDn", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
                 Help(p, r++, "Up/Down", "Speed", () => pl.ChangeSpeed(1), () => pl.ChangeSpeed(-1));
+                Help(p, r++, "+/-", "Volume up / down", () => SetVolume(volume + 10), () => SetVolume(volume - 10));
                 Help(p, r++, "S", "Settings (loop, inputs, ...)", () => pl.SettingsOpen = true);
                 Help(p, r++, "", "Click the bar to jump");
                 Help(p, r++, "T", "Trim", pl.Clip.IsRaw ? null : (Action)pl.ToggleTrim);

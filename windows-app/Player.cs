@@ -40,6 +40,7 @@ namespace FlashbackStudio
         public bool Scrubbing;              // the bar is held (no sound meanwhile)
         public string AudioError;
         public int AudioOffsetMs;           // how far the sound is ahead of the picture (last check)
+        int volume = 100;                   // how loud it plays, 0 to 100 (only here: exports are as recorded)
         public bool AudioOn => audioQueued;
         AudioOut audio;
         bool audioQueued, clockMoved;       // (the picture's clock was set: a jump, a loop, play: restart the sound)
@@ -208,6 +209,20 @@ namespace FlashbackStudio
 
         // ---- Sound
 
+        public int Volume
+        {
+            get => volume;
+            set
+            {
+                volume = Math.Max(0, Math.Min(100, value));
+                audio?.SetVolume(Loudness(volume));
+            }
+        }
+
+        // The sound's level for a volume of 'percent': squared, so each step
+        // sounds about as big as the last (hearing isn't linear).
+        static double Loudness(int percent) => percent / 100.0 * (percent / 100.0);
+
         long AudioTotal => Clip.AudioSamplesIn(Count);
 
         // Where the picture is, in sound samples (at 1x speed, the only one with sound).
@@ -271,6 +286,7 @@ namespace FlashbackStudio
                 try
                 {
                     audio = new AudioOut((int)((Clip.AudioRateMhz + 500) / 1000));
+                    audio.SetVolume(Loudness(volume));
                 }
                 catch (InvalidOperationException e)
                 {

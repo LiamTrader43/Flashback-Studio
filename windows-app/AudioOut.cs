@@ -46,6 +46,7 @@ namespace FlashbackStudio
         [DllImport("winmm.dll")] static extern int waveOutReset(IntPtr wave);
         [DllImport("winmm.dll")] static extern int waveOutClose(IntPtr wave);
         [DllImport("winmm.dll")] static extern int waveOutGetPosition(IntPtr wave, ref MmTime time, int size);
+        [DllImport("winmm.dll")] static extern int waveOutSetVolume(IntPtr wave, uint volume);
 
         readonly IntPtr wave;
         readonly IntPtr[] headers = new IntPtr[Buffers], data = new IntPtr[Buffers];
@@ -100,6 +101,14 @@ namespace FlashbackStudio
                 waveOutGetPosition(wave, ref time, Marshal.SizeOf(typeof(MmTime)));
                 return time.Type == TimeSamples ? (uint)time.Value : 0;
             }
+        }
+
+        // How loud it plays: 0 (silent) to 1 (as recorded). It changes at once,
+        // queued sound included (it's this output's volume, not the samples').
+        public void SetVolume(double level)
+        {
+            uint v = (uint)Math.Round(Math.Max(0, Math.Min(1, level)) * 0xFFFF);
+            waveOutSetVolume(wave, v | v << 16);    // (left and right)
         }
 
         // Stops the sound and lets go of every buffer (they're all done after).
