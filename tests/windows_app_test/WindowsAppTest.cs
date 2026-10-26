@@ -1,4 +1,4 @@
-// PC test of Flashback Converter (windows-app/), with the converter's own code:
+// PC test of Flashback Studio for Windows (windows-app/), with the app's own code:
 //  - its clip reader, on clips of every version: as the recorder saves them
 //    (the ring of frames and the sound wrapping around) and as Flashback Studio
 //    compacts them, with and without sound and inputs, with copies of missed
@@ -6,13 +6,15 @@
 //    must read back as written. Clips from older builds (.raw and .txt) too,
 //    and damaged clips, which must fail with the right message (or, with
 //    damaged inputs, read without them);
-//  - its input display, against Flashback Studio's own (overlay_ref, built
-//    from 3ds-app/source/main.c), for many inputs;
-//  - whole conversions with ffmpeg, if it's found (on PATH): the frames, the
-//    input display and the sound in the MP4, replacing an MP4, stopping, and a
-//    clip that turns out damaged part way.
+//  - its compacting and trimming, against the 3DS app's (compact_ref, built
+//    with 3ds-app/source/flb.c): they must write the same bytes;
+//  - its input display, against the 3DS app's own (overlay_ref, built from
+//    3ds-app/source/main.c), for many inputs;
+//  - whole exports with ffmpeg, if it's found (on PATH): the frames, the input
+//    display and the sound in the MP4, a trimmed part, replacing an MP4,
+//    stopping, and a clip that turns out damaged part way.
 //
-// usage: ConverterTest <overlay_ref.exe>
+// usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>
 // It writes its clips in the current folder.
 using System;
 using System.Collections.Generic;
@@ -21,9 +23,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using FlashbackConverter;
+using FlashbackStudio;
 
-static class ConverterTest
+static class WindowsAppTest
 {
     const int Fps = 30;
     const long RateMhz = 32728498;
@@ -289,7 +291,11 @@ static class ConverterTest
                 {
                     string wav = path + ".wav";
                     clip.WriteWav(wav);
-                    CheckWav(what, wav, s);
+                    CheckWav(what, wav, s, 0, s.Frames);
+                    // (and a part of it, as a trimmed part is exported)
+                    int first = s.Frames / 3;
+                    clip.WriteWav(wav, first, s.Frames - first);
+                    CheckWav(what + ", from frame " + first, wav, s, first, s.Frames - first);
                     File.Delete(wav);
                 }
             }
@@ -300,10 +306,14 @@ static class ConverterTest
         }
     }
 
-    static void CheckWav(string what, string wav, Spec s)
+    // The sound of frames first .. first + frames - 1: from the sample the first
+    // of them is shown at, as many samples as they last.
+    static void CheckWav(string what, string wav, Spec s, int first, int frames)
     {
         byte[] b = File.ReadAllBytes(wav);
-        long count = s.TrackLength;
+        long count = ((long)frames * RateMhz / Fps + 500) / 1000;
+        int e = EntryOfFrame(s)[first], entryFrame = s.Copies.Take(e).Sum();
+        long start = s.TrackStart + entryFrame * RateMhz / (Fps * 1000) + (first - entryFrame) * RateMhz / (Fps * 1000);
         if (b.Length != 44 + count * 4 || Encoding.ASCII.GetString(b, 0, 4) != "RIFF" ||
             BitConverter.ToUInt32(b, 24) != (RateMhz + 500) / 1000 || BitConverter.ToUInt16(b, 22) != 2 ||
             BitConverter.ToUInt32(b, 40) != count * 4)
@@ -313,7 +323,7 @@ static class ConverterTest
         }
         for (long k = 0; k < count; k++)
         {
-            long i = s.TrackStart + k;
+            long i = start + k;
             bool held = i >= s.First && i < s.End;
             short l = BitConverter.ToInt16(b, (int)(44 + k * 4)), r = BitConverter.ToInt16(b, (int)(46 + k * 4));
             if (l != (held ? Left(i) : 0) || r != (held ? Right(i) : 0))
@@ -377,7 +387,7 @@ static class ConverterTest
                 "not a Flashback clip (or the copy is incomplete)");
         Damaged("tiny", p => File.WriteAllBytes(p, new byte[20]), "not a Flashback clip (file too small)");
         Damaged("from a newer version", p => Patch32(p, -44, 4),
-                "made by a newer Flashback version; get the latest Flashback Converter");
+                "made by a newer Flashback version; get the latest Flashback Studio");
         Damaged("too wide", p => Patch32(p, -40, 401), "the clip's header is damaged");
         Damaged("index in the wrong place", p => Patch32(p, -12, index + 4), "the clip's header is damaged");
         Damaged("mono sound", p => Patch32(p, -48 - 32 + 4, 1 | 16 << 16), "the clip's audio header is damaged");
@@ -411,6 +421,115 @@ static class ConverterTest
         CheckFails("a .raw with a damaged .txt", "old.raw", "couldn't read the resolution or frame rate from its .txt");
         File.Delete("old.txt");
         CheckFails("a .raw without its .txt", "old.raw", "its .txt is missing, so its resolution and frame rate are unknown");
+    }
+
+    // ---- Compacting and trimming, against the 3DS app's
+
+    // Runs compact_ref; null, or why it failed.
+    static string Ref(string compactRef, string args)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo(compactRef, args) { UseShellExecute = false, RedirectStandardOutput = true };
+        using (Process p = Process.Start(psi))
+        {
+            string output = p.StandardOutput.ReadToEnd().Trim();
+            p.WaitForExit();
+            return p.ExitCode == 0 ? null : output;
+        }
+    }
+
+    // Compacts or trims with the app's FlbCompactor; null, or why it failed.
+    static string Mine(Func<FlbCompactor> begin)
+    {
+        try
+        {
+            FlbCompactor c = begin();
+            while (!c.Step())
+            {
+            }
+            return null;
+        }
+        catch (InvalidDataException x)
+        {
+            return x.Message;
+        }
+    }
+
+    static void SameBytes(string what, string mine, string theirs)
+    {
+        checks++;
+        byte[] a = File.ReadAllBytes(mine), b = File.ReadAllBytes(theirs);
+        if (!a.SequenceEqual(b))
+            Fail($"{what}: {a.Length} bytes, and the 3DS app's {b.Length}, differ");
+    }
+
+    static void TestCompactor(string compactRef)
+    {
+        Random rng = new Random(7);
+        for (int run = 0; run < 30; run++)
+        {
+            Spec s = new Spec
+            {
+                Audio = run % 3 != 0,
+                Inputs = run % 4 != 1,
+                Copies = Enumerable.Range(0, 1 + rng.Next(30)).Select(_ => rng.Next(4) == 0 ? 2 + rng.Next(3) : 1).ToArray(),
+            };
+            if (run % 6 == 5)
+            {
+                s.Width = 400;
+                s.Height = 240;
+            }
+            string what = $"version {s.Version}, {s.Width}x{s.Height}, {s.Frames} frames{(s.Audio ? ", sound" : "")}{(s.Inputs ? ", inputs" : "")}";
+            Write("orig.flb", s);
+            File.Copy("orig.flb", "mine.flb", true);
+            File.Copy("orig.flb", "theirs.flb", true);
+            string mine = Mine(() => FlbCompactor.Compact("mine.flb")), theirs = Ref(compactRef, "compact theirs.flb");
+            if (mine != null || theirs != null)
+                Fail($"compacting {what}: {mine ?? "ok"} / the 3DS app: {theirs ?? "ok"}");
+            else
+                SameBytes("compacting " + what, "mine.flb", "theirs.flb");
+
+            // Trimmed, from the recorded clip and from the compacted one: the
+            // start, the end, and at random (sometimes part way through a
+            // frame's copies).
+            for (int t = 0; t < 6; t++)
+            {
+                int first = rng.Next(s.Frames), count = 1 + rng.Next(s.Frames - first);
+                if (t == 0)
+                {
+                    first = 0;
+                    count = Math.Max(1, s.Frames - 1);
+                }
+                if (t == 1)
+                {
+                    first = Math.Min(1, s.Frames - 1);
+                    count = s.Frames - first;
+                }
+                string from = t % 2 == 1 ? "mine.flb" : "orig.flb";
+                File.Delete("mine_trim.flb");
+                File.Delete("theirs_trim.flb");
+                mine = Mine(() => FlbCompactor.Trim(from, "mine_trim.flb", first, count));
+                theirs = Ref(compactRef, $"trim {from} theirs_trim.flb {first} {count}");
+                string trimmed = $"trimming frames {first}+{count} of the {(t % 2 == 1 ? "compacted" : "recorded")} {what}";
+                if (mine != null || theirs != null)
+                    Fail($"{trimmed}: {mine ?? "ok"} / the 3DS app: {theirs ?? "ok"}");
+                else
+                    SameBytes(trimmed, "mine_trim.flb", "theirs_trim.flb");
+            }
+        }
+
+        // What's refused, with the 3DS app's messages, and nothing left behind.
+        void Refused(string what, Func<FlbCompactor> begin, string message)
+        {
+            checks++;
+            string why = Mine(begin);
+            if (why != message)
+                Fail($"{what}: \"{why}\", want \"{message}\"");
+        }
+        Refused("compacting a compacted clip", () => FlbCompactor.Compact("mine.flb"), "this clip is already compacted");
+        Refused("trimming onto another clip", () => FlbCompactor.Trim("orig.flb", "mine.flb", 0, 1), "there's already a clip with that name");
+        Refused("trimming frames that aren't there", () => FlbCompactor.Trim("orig.flb", "new.flb", 0, 100000), "those frames aren't in the clip");
+        if (Directory.GetFiles(".", "*.tmp").Length != 0)
+            Fail("compacting or trimming left a .tmp behind");
     }
 
     // ---- The input display
@@ -531,14 +650,17 @@ static class ConverterTest
     static int[] EntryOfFrame(Spec s) => s.Copies.SelectMany((copies, e) => Enumerable.Repeat(e, copies)).ToArray();
 
     // Converts 'clip' and checks the MP4's frames and sound.
-    static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs)
+    // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed part.)
+    static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0)
     {
         checks++;
         string mp4 = Path.ChangeExtension(clip, ".mp4");
+        if (frames == 0)
+            frames = s.Frames;
         try
         {
             using (FlbClip c = FlbClip.Open(clip))
-                Converter.ToMp4(c, mp4, inputs, ffmpeg, _ => { }, CancellationToken.None);
+                Converter.ToMp4(c, first, frames, mp4, inputs, ffmpeg, _ => { }, CancellationToken.None);
         }
         catch (Exception x)
         {
@@ -548,9 +670,9 @@ static class ConverterTest
 
         int w = s.Width * 2, h = s.Height * 2, size = w * h * 3;
         byte[] video = Run(ffmpeg, $"-v error -i \"{mp4}\" -f rawvideo -pix_fmt bgr24 -").Out;
-        if (video.Length != s.Frames * size)
+        if (video.Length != frames * size)
         {
-            Fail($"{what}: {video.Length / size} frames, want {s.Frames}");
+            Fail($"{what}: {video.Length / size} frames, want {frames}");
             return;
         }
         // Each frame must be the right picture (at twice the size, with the
@@ -565,11 +687,12 @@ static class ConverterTest
             overlay?.Draw(expected[f], InputOf(f));
         }
         double worst = 99;
-        for (int f = 0; f < s.Frames; f++)
+        for (int v = 0; v < frames; v++)
         {
-            double right = Psnr(video, f * size, expected[f], size);
+            int f = first + v;
+            double right = Psnr(video, v * size, expected[f], size);
             double other = Enumerable.Range(0, s.Frames).Where(g => entryOf[g] != entryOf[f])
-                                     .Select(g => Psnr(video, f * size, expected[g], size)).DefaultIfEmpty(0).Max();
+                                     .Select(g => Psnr(video, v * size, expected[g], size)).DefaultIfEmpty(0).Max();
             worst = Math.Min(worst, right);
             if (right < 30 || right < other + 6)
             {
@@ -577,7 +700,7 @@ static class ConverterTest
                 return;
             }
         }
-        Console.WriteLine($"  {what}: {s.Frames} frames, each within {worst:F1} dB (PSNR) of the clip's");
+        Console.WriteLine($"  {what}: {frames} frames, each within {worst:F1} dB (PSNR) of the clip's");
 
         var audio = Run(ffmpeg, $"-v error -i \"{mp4}\" -map 0:a -f s16le -ac 2 -ar 48000 -");
         if (!s.Audio)
@@ -586,13 +709,13 @@ static class ConverterTest
                 Fail($"{what}: has sound");
             return;
         }
-        long samples = audio.Out.Length / 4, want = (long)s.Frames * 48000 / Fps;
+        long samples = audio.Out.Length / 4, want = (long)frames * 48000 / Fps;
         if (audio.Exit != 0 || Math.Abs(samples - want) > 1024)
             Fail($"{what}: {samples} sound samples, want about {want}");
     }
 
     static string[] Leftovers(string dir) =>
-        Directory.GetFiles(dir, "*.part").Concat(Directory.GetFiles(Path.GetTempPath(), "FlashbackConverter-*.wav")).ToArray();
+        Directory.GetFiles(dir, "*.part").Concat(Directory.GetFiles(Path.GetTempPath(), "FlashbackStudio-*.wav")).ToArray();
 
     static void TestConversions(string ffmpeg)
     {
@@ -603,6 +726,7 @@ static class ConverterTest
         Spec plain = new Spec { Width = 400, Height = 240, Compacted = true, Copies = new[] { 2, 1, 1, 3 } };
         Write("plain.flb", plain);
         CheckConversion("compacted, without sound or inputs", ffmpeg, "plain.flb", plain, true);
+        CheckConversion("a trimmed part (frames 2-9)", ffmpeg, "big.flb", s, true, 2, 8);
 
         // Stopping, and a clip that turns out damaged part way: the MP4 that was
         // there is left as it was, and nothing else is left behind.
@@ -637,22 +761,25 @@ static class ConverterTest
 
     static int Main(string[] args)
     {
-        if (args.Length != 1)
+        if (args.Length != 2)
         {
-            Console.WriteLine("usage: ConverterTest <overlay_ref.exe>");
+            Console.WriteLine("usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>");
             return 2;
         }
         TestReader();
         Console.WriteLine($"{checks} clips checked");
+        int compared = checks;
+        TestCompactor(Path.GetFullPath(args[1]));
+        Console.WriteLine($"{checks - compared} compacted and trimmed clips compared with the 3DS app's");
         TestOverlay(Path.GetFullPath(args[0]));
         string ffmpeg = Converter.FindFfmpeg();
         if (ffmpeg == null)
-            Console.WriteLine("ffmpeg isn't on PATH: the conversions weren't tested");
+            Console.WriteLine("ffmpeg isn't on PATH: the exports weren't tested");
         else
         {
             int before = checks;
             TestConversions(ffmpeg);
-            Console.WriteLine($"{checks - before} conversions checked, with {ffmpeg}");
+            Console.WriteLine($"{checks - before} exports checked, with {ffmpeg}");
         }
         Console.WriteLine($"{(errors != 0 ? "FAILED" : "all good")} ({errors} errors)");
         return errors != 0 ? 1 : 0;

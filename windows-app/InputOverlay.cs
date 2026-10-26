@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace FlashbackConverter
+namespace FlashbackStudio
 {
     // The input display, drawn over a video frame as Flashback Studio draws it
     // over a clip (see drawInputs in 3ds-app/source/main.c, and keep the two
@@ -55,6 +55,8 @@ namespace FlashbackConverter
         }
 
         readonly int width, height;         // the frame's
+        public int Width => width;
+        public int Height => height;
         readonly float scale;               // the layout's, in the frame
         readonly int x0, y0;                // where it is in the frame
         readonly Pixel[] pixels;

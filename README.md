@@ -7,57 +7,103 @@
 
 Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last 10 seconds to 2 minutes of gameplay and saves them on a button press.
 
-`.flb` clips use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. **Use the converter here to turn them into normal videos.**
+`.flb` clips use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. **Use Flashback Studio for Windows to turn them into normal videos.**
 
 ## What's included
 
 | Tool | Status | What it does |
 |---|---|---|
-| Flashback Converter | Available (Windows) | Converts `.flb` clips into MP4 videos, with the input display over them if you like |
+| Flashback Studio for Windows | Available | Everything the 3DS app does, on a PC, plus exporting clips as MP4 videos (with the input display over them if you like) |
 | Flashback Studio (3DS app) | Available (`.3dsx` or `.cia`) | Plays clips on the 3DS itself, with sound, and trims, renames and compacts them (to about half their size) |
 
-## Converting clips to MP4 (Windows)
+## Flashback Studio for Windows
+
+The 3DS app on a PC, with its two screens side by side: the top screen (left) shows the selected clip, or the clip playing, and the bottom screen (right) has the clip grid, or the player's controls. It plays clips with their sound and their inputs, trims, compacts, renames and deletes them like the 3DS app does, and exports them as MP4 videos.
 
 ### What you need
 
-* **Windows 10 or 11.** The converter uses .NET Framework 4.8, which comes with them. There's no macOS or Linux version yet.
-* That's all: the converter comes with [ffmpeg](https://ffmpeg.org), which does the video encoding.
+* **Windows 10 or 11.** The app uses .NET Framework 4.8, which comes with them. There's no macOS or Linux version yet.
+* That's all: it comes with [ffmpeg](https://ffmpeg.org), which does the video encoding when you export.
 
-### How to use it
+### Starting it
 
-1. Download `FlashbackConverter.zip` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest), and extract it anywhere. Keep `ffmpeg.exe` next to `FlashbackConverter.exe`.
-2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC.
-3. Open `FlashbackConverter.exe`, and drag clips, or folders of clips, into its window (or use **Add clips…** and **Add folder…**). Dragging them onto `FlashbackConverter.exe` itself opens it with them.
-4. Press **Convert**.
+1. Download `FlashbackStudio-Windows.zip` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest), and extract it anywhere. Keep `ffmpeg.exe` next to `FlashbackStudio.exe`.
+2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC, or put the SD card in your PC.
+3. Open `FlashbackStudio.exe`.
 
-The list shows each clip's length, resolution and frame rate, and whether it has sound and inputs. Then, as it goes, how converting each one went.
+It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, press **O**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`.
 
-Each clip becomes an MP4 next to it (`clip_<date>.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+### Using it
 
-**Input display.** With **Show the input display in the videos** ticked (it is to start with), clips recorded with their inputs show them in the video's bottom-left corner, just as Flashback Studio shows them: the buttons held during each frame, where the Circle Pad was, and where the touch screen was touched. Untick it for videos of just the game. Clips recorded before Flashback recorded the inputs convert without it.
+It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-the-3ds)), with keys instead of the buttons, and the mouse instead of the touch screen: the keys are listed at the bottom of the bottom screen, and clicking one does what it says. Click a clip to select it, and click it again to play it.
 
-Clips that already have an MP4 are skipped, so it's safe to add the same folder again. To convert them again (with the input display switched off, for example), tick **Replace MP4s that already exist**. **Stop** stops converting: the clip being converted keeps the MP4 it had, if any, and the clips already done keep their new ones.
+| Clip list | |
+|---|---|
+| Arrow keys | Select a clip |
+| Enter (or click the selected clip) | Play the clip |
+| T | Trim the clip |
+| E | Export the clip as an MP4 (see below) |
+| Shift+E | Export every clip as an MP4 |
+| C | Compact the clip (asks first) |
+| F2 | Rename the clip (spaces become dashes; names Windows can't use are refused) |
+| Delete | Delete the clip (asks first): it goes to the Recycle Bin, or on an SD card, is deleted for good |
+| F5 | Read the folder again |
+| O | Open another folder |
 
-Clips compacted or trimmed by the 3DS app, and clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it), convert the same way.
+| Playing a clip | |
+|---|---|
+| Space (or click the picture) | Play/pause |
+| Left/Right | Previous/next frame (pauses) |
+| Page Up/Page Down (or Shift+Left/Right) | Back/forward 1 second |
+| Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
+| S | Settings: Loop, Input display, Timing details |
+| Click or drag along the bar | Jump to that point |
+| T | Trim |
+| E | Export as an MP4 |
+| Esc | Back to the clip list |
+
+| Trimming | |
+|---|---|
+| I / O | Start / end the selection at this frame |
+| Space | Play/pause the selection |
+| Left/Right | Previous/next frame |
+| Up/Down | Forward/back 1 second |
+| Enter | Save the selection as a new clip (asks first) |
+| E | Export the selection as an MP4 |
+| L | Loop on/off |
+| T or Esc | Stop trimming |
+
+Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting, trimming, renaming and deleting do exactly what they do on the 3DS, and write exactly the same clips, so clips can go back and forth between the two. Esc cancels compacting or trimming at any time, and leaves the clip as it was.
+
+### Exporting MP4s
+
+**E** exports the selected clip (or, while trimming, the selection), and **Shift+E** every clip in the folder. Each MP4 goes next to its clip (`clip_<date>.mp4`; a trimmed selection's as `<name>-trim.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+
+Before it starts, it asks:
+
+* **Input display** (**I** to change; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
+* **Exporting every clip:** clips that already have an MP4 are skipped, so it's safe to export the same folder again. **R** replaces their MP4s instead (to export them again with the input display switched off, for example).
+
+Esc stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
 
 ### If something goes wrong
 
-The Status column says why a clip can't be converted, or why converting it failed. Hold the mouse over a clip to see all of a long message.
+The bottom screen says what went wrong, under the selected clip's details.
 
 | Message | What to do |
 |---|---|
-| `ffmpeg.exe wasn't found` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackConverter.exe`. Opening the converter from inside the zip, without extracting it, doesn't work. |
-| Windows says "Windows protected your PC" | The converter isn't signed, so Windows doesn't know it. Click **More info**, then **Run anyway**. |
+| `Exporting needs ffmpeg.exe next to FlashbackStudio.exe` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackStudio.exe`. Opening the app from inside the zip, without extracting it, doesn't work. |
+| Windows says "Windows protected your PC" | The app isn't signed, so Windows doesn't know it. Click **More info**, then **Run anyway**. |
 | `Not a Flashback clip (or the copy is incomplete)`, `Not a Flashback clip (file too small)` or `The file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
-| `Made by a newer Flashback version` | Download Flashback Converter from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
+| `Made by a newer Flashback version` | Download Flashback Studio from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
 | `... is damaged` or `The clip's frame count doesn't match its index` | The clip file is corrupted. Copy it from the SD card again; if that doesn't help, the recording itself was damaged. |
-| `Failed: ffmpeg failed: ...` | ffmpeg's own message follows. The most common cause is a full disk. |
+| `ffmpeg failed: ...` | ffmpeg's own message follows. The most common cause is a full disk. |
 | `Its .txt is missing` / `Couldn't read the resolution or frame rate from its .txt` | Only for older `.raw` clips: copy the `.txt` with the same name from the SD card next to the `.raw`. |
-| `Its MP4 already exists` | Already converted. Tick **Replace MP4s that already exist** to convert it again. |
+| `No sound: the sound output couldn't be opened` | Windows has no sound output (or it's in use by another app in exclusive mode). The clip plays without sound. |
 
 ### Building it
 
-The converter is in [`windows-app/`](windows-app): a small Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build windows-app -c Release` builds `windows-app/bin/Release/net48/FlashbackConverter.exe`. To convert with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
+The Windows app is in [`windows-app/`](windows-app): a Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build windows-app -c Release` builds `windows-app/bin/Release/net48/FlashbackStudio.exe`. To export with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
 
 ## Watching clips on the 3DS
 
@@ -149,7 +195,7 @@ Select a clip and press R. The details under the list show how big it will be. C
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
-* **Compacted clips** play in the app and convert with Flashback Converter like any other clip, sound and inputs included (only the sound the clip's frames last is kept).
+* **Compacted clips** play in the app and export with Flashback Studio for Windows like any other clip, sound and inputs included (only the sound the clip's frames last is kept).
 
 ### Building it
 
@@ -159,7 +205,7 @@ Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS too
 
 The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
 
-[`tests/`](tests) has PC tests that run the app's own code (the clip reader and compactor, and the player's read-ahead) and the converter's. Run them with `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
+[`tests/`](tests) has PC tests that run the app's own code (the clip reader and compactor, and the player's read-ahead) and the Windows app's. Run them with `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
 
 ## The `.flb` clip format
 
@@ -181,7 +227,7 @@ The trailer's version number belongs to the file format. It isn't the version of
 
 A compacted clip has the same frames back to back, with no unused space, and each index entry gives its frame's position in the file instead of its slot.
 
-The recorded clip format is documented in [`sysmodules/rosalina/source/flashback_clip.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_clip.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress` in [`flashback_compress.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_compress.c). All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h); the decoders in the converter and the 3DS app follow those descriptions.
+The recorded clip format is documented in [`sysmodules/rosalina/source/flashback_clip.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_clip.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress` in [`flashback_compress.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_compress.c). All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h); the readers in the Windows app and the 3DS app follow those descriptions.
 
 ## License
 

@@ -1,7 +1,7 @@
 using System;
 using System.Windows.Forms;
 
-namespace FlashbackConverter
+namespace FlashbackStudio
 {
     static class Program
     {

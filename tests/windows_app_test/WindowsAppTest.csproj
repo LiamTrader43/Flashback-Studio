@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The converter test (see ../README.md): ConverterTest.cs, with the
-       converter's own reader, input display and conversion. -->
+  <!-- The Windows app test (see ../README.md): WindowsAppTest.cs, with the
+       app's own clip reader, compactor, input display and export. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net48</TargetFramework>
@@ -12,8 +12,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="ConverterTest.cs" />
+    <Compile Include="WindowsAppTest.cs" />
     <Compile Include="..\..\windows-app\FlbClip.cs" />
+    <Compile Include="..\..\windows-app\FlbCompactor.cs" />
     <Compile Include="..\..\windows-app\InputOverlay.cs" />
     <Compile Include="..\..\windows-app\Converter.cs" />
   </ItemGroup>

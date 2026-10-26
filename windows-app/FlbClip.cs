@@ -4,7 +4,7 @@ using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace FlashbackConverter
+namespace FlashbackStudio
 {
     // The inputs during a frame (see 3ds-app/source/flb.h): the buttons held at
     // any time during it (the 3DS's KEY_* bits, with KeyTouch for the touch
@@ -20,47 +20,65 @@ namespace FlashbackConverter
     }
 
     // Reader for Flashback clip files (.flb), recorded by Luma3DS-Flashback and
-    // compacted or trimmed by the Flashback Studio 3DS app. All three versions of
-    // the format, and the inputs, are described in 3ds-app/source/flb.h; this
-    // follows flb.c, with the same checks and messages.
+    // compacted or trimmed by Flashback Studio. All three versions of the format,
+    // and the inputs, are described in 3ds-app/source/flb.h; this follows flb.c,
+    // with the same checks and messages.
     //
     // It also reads clips saved by older Flashback builds: raw RGB565 frames back
     // to back in a .raw, with a .txt next to it saying their resolution and frame
-    // rate.
+    // rate. They play and export like the others (as if each frame were an index
+    // entry), but can't be compacted or trimmed.
     sealed class FlbClip : IDisposable
     {
         const uint Magic = 0x4B424C46;          // "FLBK"
         const uint InputMagic = 0x49424C46;     // "FLBI"
-        const int TrailerSize = 48;
-        const int AudioInfoSize = 32;
-        const int InputHeaderSize = 16;
-        const int InputRecordSize = 16;
+        public const int TrailerSize = 48;
+        public const int AudioInfoSize = 32;
+        public const int InputHeaderSize = 16;
+        public const int InputRecordSize = 16;
 
-        struct Entry
+        // A stored frame: where it is in the file, its size, how many times it's
+        // shown, the clip frame it's first shown at, and (with sound) the sample
+        // it's first shown at.
+        public struct Entry
         {
             public long Offset;
-            public int Size, Copies;
+            public int Size, Copies, FirstFrame;
+            public long AudioPos;
         }
 
         public string Path { get; }
+        public bool IsRaw { get; private set; }         // an older .raw clip
+        public uint Version { get; private set; }       // 1: as recorded, 2: compacted, 3: with sound (either)
         public int Width { get; private set; }
         public int Height { get; private set; }
         public int Fps { get; private set; }
+        public long SlotStride { get; private set; }    // bytes between ring slots (0 once compacted)
+        public int SlotBytes { get; private set; }      // the size of an uncompressed frame
         public int FrameCount { get; private set; }     // frames in the clip, copies included
+        public long FileSize { get; private set; }
         public bool HasAudio { get; private set; }
+        public long AudioRateMhz { get; private set; }  // the sound's sample rate, in millihertz
+        public long AudioMissed { get; private set; }
         public FlbInput[] Inputs { get; private set; }  // the inputs during each frame, or null if the clip has none
 
+        // Compacted already (version 2, or 3 without slots)?
+        public bool IsCompacted => Version == 2 || (Version == 3 && SlotStride == 0);
+        public int EntryCount => entries.Length;
+        public Entry this[int e] => entries[e];
+
         readonly FileStream file;
-        bool raw;                   // an older .raw clip
-        Entry[] entries;            // (.flb) the stored frames, oldest first
-        long audioRateMhz, audioOffset, audioCapacity, audioFirst, audioEnd, audioStart;
+        Entry[] entries;            // the stored frames, oldest first
+        long audioOffset, audioCapacity, audioFirst, audioEnd;
 
         FlbClip(string path)
         {
             Path = path;
             try
             {
-                file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+                // (Others may rename or delete it meanwhile: this program does, while
+                // its thumbnails are being read.)
+                file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1 << 16);
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
             {
@@ -69,7 +87,8 @@ namespace FlashbackConverter
         }
 
         // Opens a clip and reads its index and inputs (the frames are read by
-        // Frames). Throws InvalidDataException, saying what's wrong, if it can't.
+        // DecodeEntry or Frames). Throws InvalidDataException, saying what's
+        // wrong, if it can't.
         public static FlbClip Open(string path)
         {
             FlbClip clip = new FlbClip(path);
@@ -98,13 +117,20 @@ namespace FlashbackConverter
 
         void ReadAt(long offset, byte[] buf, int at, int len)
         {
-            file.Seek(offset, SeekOrigin.Begin);
-            for (int got = 0; got < len; )
+            try
             {
-                int n = file.Read(buf, at + got, len - got);
-                if (n <= 0)
-                    throw new InvalidDataException("the file ends early (was it copied completely?)");
-                got += n;
+                file.Seek(offset, SeekOrigin.Begin);
+                for (int got = 0; got < len; )
+                {
+                    int n = file.Read(buf, at + got, len - got);
+                    if (n <= 0)
+                        throw new InvalidDataException("the file ends early (was it copied completely?)");
+                    got += n;
+                }
+            }
+            catch (IOException e)
+            {
+                throw new InvalidDataException("the file couldn't be read (" + e.Message.TrimEnd('.') + ")");
             }
         }
 
@@ -119,7 +145,7 @@ namespace FlashbackConverter
                 throw new InvalidDataException("not a Flashback clip (or the copy is incomplete)");
             uint version = U32(t, 4);
             if (version < 1 || version > 3)
-                throw new InvalidDataException("made by a newer Flashback version; get the latest Flashback Converter");
+                throw new InvalidDataException("made by a newer Flashback version; get the latest Flashback Studio");
             int entrySize = version == 3 ? 16 : 12;
             int audioInfoSize = version == 3 ? AudioInfoSize : 0;
 
@@ -131,10 +157,14 @@ namespace FlashbackConverter
                 fps == 0 || fps > 60 || (version == 1 && stride < slotBytes) || entryCount > length / 12 ||
                 indexOffset + entryCount * entrySize + audioInfoSize + TrailerSize != length)
                 throw new InvalidDataException("the clip's header is damaged");
+            Version = version;
             Width = (int)width;
             Height = (int)height;
             Fps = (int)fps;
+            SlotStride = stride;
+            SlotBytes = (int)slotBytes;
             FrameCount = (int)frameCount;
+            FileSize = length;
 
             byte[] index = new byte[entryCount * entrySize + audioInfoSize];
             ReadAt(indexOffset, index, 0, index.Length);
@@ -143,16 +173,16 @@ namespace FlashbackConverter
             {
                 int a = (int)entryCount * entrySize;
                 HasAudio = true;
-                audioRateMhz = U32(index, a);
+                AudioRateMhz = U32(index, a);
                 audioOffset = U32(index, a + 8);
                 audioCapacity = U32(index, a + 12);
                 audioFirst = U32(index, a + 16);
                 audioEnd = U32(index, a + 20);
-                if (U16(index, a + 4) != 2 || U16(index, a + 6) != 16 || audioRateMhz < 8000000 ||
-                    audioRateMhz > 96000000 || audioCapacity == 0 || audioOffset + audioCapacity * 4 > indexOffset ||
+                AudioMissed = U32(index, a + 24);
+                if (U16(index, a + 4) != 2 || U16(index, a + 6) != 16 || AudioRateMhz < 8000000 ||
+                    AudioRateMhz > 96000000 || audioCapacity == 0 || audioOffset + audioCapacity * 4 > indexOffset ||
                     audioFirst > audioEnd || audioEnd - audioFirst > audioCapacity)
                     throw new InvalidDataException("the clip's audio header is damaged");
-                audioStart = entryCount > 0 ? U32(index, 12) : 0;   // (the first entry's audioPos)
             }
 
             entries = new Entry[entryCount];
@@ -165,7 +195,14 @@ namespace FlashbackConverter
                 if (size == 0 || size > slotBytes || copies == 0 || copies > frameCount - frames ||
                     offset + size > indexOffset)
                     throw new InvalidDataException($"frame entry {e} is damaged");
-                entries[e] = new Entry { Offset = offset, Size = (int)size, Copies = (int)copies };
+                entries[e] = new Entry
+                {
+                    Offset = offset,
+                    Size = (int)size,
+                    Copies = (int)copies,
+                    FirstFrame = (int)frames,
+                    AudioPos = HasAudio ? U32(index, e * entrySize + 12) : 0,
+                };
                 frames += copies;
             }
             if (frames != frameCount || entryCount == 0)
@@ -175,7 +212,7 @@ namespace FlashbackConverter
         }
 
         // The clip's inputs, if it has any and they read back sound; a clip whose
-        // inputs can't be read converts without them (as in flb.c).
+        // inputs can't be read plays without them (as in flb.c).
         FlbInput[] ReadInputs(long inputOffset, long indexOffset)
         {
             if (inputOffset == 0 || inputOffset + InputHeaderSize > indexOffset)
@@ -227,13 +264,18 @@ namespace FlashbackConverter
                 !int.TryParse(fps.Groups[1].Value, out int rate) ||
                 width <= 0 || height <= 0 || width > 400 || height > 240 || rate <= 0 || rate > 60)
                 throw new InvalidDataException("couldn't read the resolution or frame rate from its .txt");
-            raw = true;
+            IsRaw = true;
             Width = width;
             Height = height;
             Fps = rate;
-            FrameCount = (int)(file.Length / (width * height * 2));
+            SlotBytes = width * height * 2;
+            FileSize = file.Length;
+            FrameCount = (int)(FileSize / SlotBytes);
             if (FrameCount == 0)
                 throw new InvalidDataException("the file ends early (was it copied completely?)");
+            entries = new Entry[FrameCount];
+            for (int f = 0; f < FrameCount; f++)
+                entries[f] = new Entry { Offset = (long)f * SlotBytes, Size = SlotBytes, Copies = 1, FirstFrame = f };
         }
 
         // The recorder's frame compression, QOI-style ops on RGB565 pixels (see
@@ -300,33 +342,91 @@ namespace FlashbackConverter
             return p == len;
         }
 
-        // The clip's frames, oldest first: each one's pixels (RGB565, top row
-        // first; the same array each time) and how many times it's shown.
-        public IEnumerable<(ushort[] Pixels, int Copies)> Frames()
+        byte[] stored;      // (DecodeEntry's)
+
+        // Reads entry 'e' as it's stored in the file (into 'buf', at least its Size long).
+        public void ReadStored(int e, byte[] buf)
         {
-            int pixels = Width * Height, frameBytes = pixels * 2;
-            ushort[] frame = new ushort[pixels];
-            byte[] stored = new byte[frameBytes];
-            if (raw)
+            ReadAt(entries[e].Offset, buf, 0, entries[e].Size);
+        }
+
+        // Reads and decodes entry 'e' into 'dst' (Width * Height pixels, RGB565,
+        // top row first).
+        public void DecodeEntry(int e, ushort[] dst)
+        {
+            if (stored == null)
+                stored = new byte[SlotBytes];
+            ReadStored(e, stored);
+            if (entries[e].Size == SlotBytes)
+                Buffer.BlockCopy(stored, 0, dst, 0, SlotBytes);
+            else if (!Decompress(stored, entries[e].Size, dst, Width * Height))
+                throw new InvalidDataException($"frame {e} is damaged");
+        }
+
+        // The index entry shown at clip frame 'frame' (0 .. FrameCount - 1).
+        public int EntryForFrame(int frame)
+        {
+            int lo = 0, hi = entries.Length - 1;
+            while (lo < hi)
             {
-                for (int f = 0; f < FrameCount; f++)
-                {
-                    ReadAt((long)f * frameBytes, stored, 0, frameBytes);
-                    Buffer.BlockCopy(stored, 0, frame, 0, frameBytes);
-                    yield return (frame, 1);
-                }
-                yield break;
+                int mid = (lo + hi + 1) / 2;
+                if (entries[mid].FirstFrame <= frame)
+                    lo = mid;
+                else
+                    hi = mid - 1;
             }
-            for (int e = 0; e < entries.Length; e++)
+            return lo;
+        }
+
+        // Frames firstFrame .. firstFrame + frameCount - 1, in order: each stored
+        // frame's pixels (RGB565, top row first; the same array each time) and
+        // how many of those frames it's shown for.
+        public IEnumerable<(ushort[] Pixels, int Copies)> Frames(int firstFrame, int frameCount)
+        {
+            ushort[] frame = new ushort[Width * Height];
+            int end = firstFrame + frameCount;
+            for (int e = EntryForFrame(firstFrame); e < entries.Length && entries[e].FirstFrame < end; e++)
             {
-                Entry entry = entries[e];
-                ReadAt(entry.Offset, stored, 0, entry.Size);
-                if (entry.Size == frameBytes)
-                    Buffer.BlockCopy(stored, 0, frame, 0, frameBytes);
-                else if (!Decompress(stored, entry.Size, frame, pixels))
-                    throw new InvalidDataException($"frame {e} is damaged");
-                yield return (frame, entry.Copies);
+                DecodeEntry(e, frame);
+                int from = Math.Max(entries[e].FirstFrame, firstFrame), to = Math.Min(entries[e].FirstFrame + entries[e].Copies, end);
+                yield return (frame, to - from);
             }
+        }
+
+        public IEnumerable<(ushort[] Pixels, int Copies)> Frames() => Frames(0, FrameCount);
+
+        // How many sound samples 'frames' frames last, rounded (flbAudioSamplesIn).
+        public long AudioSamplesIn(int frames) => ((long)frames * AudioRateMhz / Fps + 500) / 1000;
+
+        // How many sound samples into its entry's sound copy number 'k' of it
+        // starts (each copy comes sampleRate / fps samples after the one before).
+        public long AudioOffsetOf(int k) => (long)k * AudioRateMhz / ((long)Fps * 1000);
+
+        // The sample at which clip frame 'frame' is first shown.
+        public long AudioPosOf(int frame)
+        {
+            Entry e = entries[EntryForFrame(frame)];
+            return e.AudioPos + AudioOffsetOf(frame - e.FirstFrame);
+        }
+
+        // Reads samples first .. first + count - 1 (stereo PCM16) into 'dst';
+        // samples the clip doesn't hold are silence (flbReadAudio).
+        public void ReadAudio(long first, int count, short[] dst)
+        {
+            Array.Clear(dst, 0, count * 2);
+            if (!HasAudio)
+                return;
+            byte[] buf = new byte[count * 4];
+            // The part of these samples the clip holds, in at most two pieces (the ring wraps).
+            long a = Math.Max(first, audioFirst), b = Math.Min(first + count, audioEnd);
+            while (a < b)
+            {
+                long pos = a % audioCapacity;
+                long n = Math.Min(b - a, audioCapacity - pos);
+                ReadAt(audioOffset + pos * 4, buf, (int)(a - first) * 4, (int)n * 4);
+                a += n;
+            }
+            Buffer.BlockCopy(buf, 0, dst, 0, count * 4);
         }
 
         static void Put32(byte[] b, int o, long v)
@@ -343,14 +443,14 @@ namespace FlashbackConverter
             b[o + 1] = (byte)(v >> 8);
         }
 
-        // Writes the clip's sound to a WAV file, as long as the clip: from the
-        // sample at which the first frame is shown, as many as its frames last
-        // (as flbAudioSamples counts them). Samples the clip doesn't hold (from
-        // before recording started, ...) are silence.
-        public void WriteWav(string wav)
+        // Writes the sound of frames firstFrame .. firstFrame + frameCount - 1 to
+        // a WAV file: from the sample at which the first of them is shown, as many
+        // as they last. Samples the clip doesn't hold (from before recording
+        // started, ...) are silence.
+        public void WriteWav(string wav, int firstFrame, int frameCount)
         {
-            long count = ((long)FrameCount * audioRateMhz / Fps + 500) / 1000;
-            long rate = (audioRateMhz + 500) / 1000;
+            long start = AudioPosOf(firstFrame), count = AudioSamplesIn(frameCount);
+            long rate = (AudioRateMhz + 500) / 1000;
             byte[] header = new byte[44];
             Encoding.ASCII.GetBytes("RIFF").CopyTo(header, 0);
             Put32(header, 4, 36 + count * 4);
@@ -368,25 +468,19 @@ namespace FlashbackConverter
             using (FileStream o = new FileStream(wav, FileMode.Create, FileAccess.Write))
             {
                 o.Write(header, 0, header.Length);
+                short[] samples = new short[65536 * 2];
                 byte[] buf = new byte[65536 * 4];
                 for (long done = 0; done < count; )
                 {
                     int n = (int)Math.Min(count - done, 65536);
-                    Array.Clear(buf, 0, n * 4);
-                    // The part of these samples the clip holds, in at most two pieces (the ring wraps).
-                    long a = Math.Max(audioStart + done, audioFirst);
-                    long b = Math.Min(audioStart + done + n, audioEnd);
-                    while (a < b)
-                    {
-                        long pos = a % audioCapacity;
-                        long k = Math.Min(b - a, audioCapacity - pos);
-                        ReadAt(audioOffset + pos * 4, buf, (int)(a - audioStart - done) * 4, (int)k * 4);
-                        a += k;
-                    }
+                    ReadAudio(start + done, n, samples);
+                    Buffer.BlockCopy(samples, 0, buf, 0, n * 4);
                     o.Write(buf, 0, n * 4);
                     done += n;
                 }
             }
         }
+
+        public void WriteWav(string wav) => WriteWav(wav, 0, FrameCount);
     }
 }

@@ -36,41 +36,45 @@ def extract_overlay():
     open(os.path.join(BUILD, 'overlay_extracted.c'), 'w', encoding='utf-8').write(src[start:end])
 
 
-def converter_test(cc):
-    """Builds overlay_ref and the converter test, and runs it in build/converter/;
-    returns whether it passed, or None if there's no .NET SDK to build it."""
+def build(cc, exe, sources, flags=(), libs=()):
+    """Builds a C program; returns whether it built."""
+    p = subprocess.run([cc, '-O2', *flags, '-o', exe, *sources, *libs],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if p.returncode != 0:
+        print(p.stdout.rstrip() or f'{cc} failed, with no output')
+    return p.returncode == 0
+
+
+def windows_app_test(cc):
+    """Builds overlay_ref, compact_ref and the Windows app test, and runs it in
+    build/windows_app/; returns whether it passed, or None if there's no .NET
+    SDK to build it."""
     dotnet = shutil.which('dotnet')
     if dotnet is None:
         print('No .NET SDK ("dotnet") found: skipped (see README.md).')
         return None
     extract_overlay()
-    ref = os.path.join(BUILD, 'overlay_ref' + EXE)
-    p = subprocess.run([cc, '-O2', '-I', SOURCE, '-I', BUILD, '-o', ref, os.path.join(HERE, 'overlay_ref.c'), '-lm'],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if p.returncode != 0:
-        print(p.stdout.rstrip() or f'{cc} failed, with no output')
+    overlay_ref = os.path.join(BUILD, 'overlay_ref' + EXE)
+    compact_ref = os.path.join(BUILD, 'compact_ref' + EXE)
+    if not (build(cc, overlay_ref, [os.path.join(HERE, 'overlay_ref.c')], ['-I', SOURCE, '-I', BUILD], ['-lm']) and
+            build(cc, compact_ref, [os.path.join(HERE, 'compact_ref.c'), os.path.join(SOURCE, 'flb.c')], ['-I', SOURCE])):
         return False
-    out = os.path.join(BUILD, 'converter_test')
-    p = subprocess.run([dotnet, 'build', os.path.join(HERE, 'converter_test', 'ConverterTest.csproj'), '-c', 'Release',
+    out = os.path.join(BUILD, 'windows_app_test')
+    p = subprocess.run([dotnet, 'build', os.path.join(HERE, 'windows_app_test', 'WindowsAppTest.csproj'), '-c', 'Release',
                         '-o', out, '-nologo', '-v', 'quiet'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if p.returncode != 0:
         print(p.stdout.rstrip() or 'dotnet build failed, with no output')
         return False
-    work = os.path.join(BUILD, 'converter')
+    work = os.path.join(BUILD, 'windows_app')
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
-    return subprocess.run([os.path.join(out, 'ConverterTest.exe'), ref], cwd=work).returncode == 0
+    return subprocess.run([os.path.join(out, 'WindowsAppTest.exe'), overlay_ref, compact_ref], cwd=work).returncode == 0
 
 
 def build_and_run(cc, name, sources, flags=(), libs=()):
     """Builds a test and runs it in build/; returns whether it passed."""
     exe = os.path.join(BUILD, name + EXE)
-    p = subprocess.run([cc, '-O2', *flags, '-o', exe, *sources, *libs],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if p.returncode != 0:
-        print(p.stdout.rstrip() or f'{cc} failed, with no output')
-        return False
-    return subprocess.run([exe], cwd=BUILD).returncode == 0
+    return build(cc, exe, sources, flags, libs) and subprocess.run([exe], cwd=BUILD).returncode == 0
 
 
 def main():
@@ -94,8 +98,8 @@ def main():
     extract_ahead()
     results.append(('read-ahead test', build_and_run(cc, 'ahead_test', [os.path.join(HERE, 'ahead_test.c')],
                                                      ['-I', BUILD], ['-lpthread'])))
-    print('\n=== converter test', flush=True)
-    results.append(('converter test', converter_test(cc)))
+    print('\n=== Windows app test', flush=True)
+    results.append(('Windows app test', windows_app_test(cc)))
 
     print('\n=== summary')
     for name, ok in results:

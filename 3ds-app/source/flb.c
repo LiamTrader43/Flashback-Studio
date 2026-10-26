@@ -88,7 +88,7 @@ static uint32_t flbAudioOffsetOf(const FlbInfo *info, uint32_t frame)
     return (uint32_t)((uint64_t)frame * info->audioRateMhz / ((uint64_t)info->fps * 1000));
 }
 
-// The same checks as the converter (windows-app/FlbClip.cs), with the same messages.
+// The same checks as the Windows app (windows-app/FlbClip.cs), with the same messages.
 bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
 {
     uint8_t t[FLB_TRAILER_SIZE];

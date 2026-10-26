@@ -141,7 +141,8 @@ uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCou
 // (so the caller can show progress), which then replaces the clip (compacting)
 // or becomes a new clip (trimming). The clip itself is only touched at the very
 // end of a compaction, and is left as it was if anything fails or it's
-// cancelled.
+// cancelled. The Windows app does the same (windows-app/FlbCompactor.cs), byte
+// for byte: keep the two alike (tests/ checks they are).
 typedef struct FlbCompactor {
     FlbClip clip;
     FILE *out;

@@ -1,20 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Flashback Converter: turns Flashback clips into MP4 videos (see README.md).
-       .NET Framework 4.8 comes with Windows 10 and 11, so the .exe runs on its
-       own, with ffmpeg.exe next to it (or on PATH). -->
+  <!-- Flashback Studio for Windows: plays, trims, compacts, renames and exports
+       Flashback clips (see README.md). .NET Framework 4.8 comes with Windows 10
+       and 11, so the .exe runs on its own, with ffmpeg.exe next to it (or on
+       PATH) for exporting. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net48</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>FlashbackConverter</AssemblyName>
-    <RootNamespace>FlashbackConverter</RootNamespace>
+    <AssemblyName>FlashbackStudio</AssemblyName>
+    <RootNamespace>FlashbackStudio</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <!-- Flashback Studio's icon (3ds-app/assets/icon-1024.png), at Windows' sizes -->
     <ApplicationIcon>icon.ico</ApplicationIcon>
-    <Product>Flashback Converter</Product>
-    <Description>Turns Flashback clips (.flb) into MP4 videos</Description>
+    <Product>Flashback Studio</Product>
+    <Description>Plays, trims, compacts and exports Flashback clips (.flb)</Description>
     <DebugType>none</DebugType>
     <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
   </PropertyGroup>
@@ -22,6 +23,8 @@
   <ItemGroup>
     <!-- (the window's icon too, with all its sizes) -->
     <EmbeddedResource Include="icon.ico" LogicalName="icon.ico" />
+    <!-- (for sending deleted clips to the Recycle Bin) -->
+    <Reference Include="Microsoft.VisualBasic" />
   </ItemGroup>
 
 </Project>
