@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Flashback Converter: turns Flashback clips into MP4 videos (see README.md).
+       .NET Framework 4.8 comes with Windows 10 and 11, so the .exe runs on its
+       own, with ffmpeg.exe next to it (or on PATH). -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>FlashbackConverter</AssemblyName>
+    <RootNamespace>FlashbackConverter</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Product>Flashback Converter</Product>
+    <Description>Turns Flashback clips (.flb) into MP4 videos</Description>
+    <DebugType>none</DebugType>
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
+  </PropertyGroup>
+
+</Project>

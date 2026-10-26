@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The converter test (see ../README.md): ConverterTest.cs, with the
+       converter's own reader, input display and conversion. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DebugType>none</DebugType>
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="ConverterTest.cs" />
+    <Compile Include="..\..\converter\FlbClip.cs" />
+    <Compile Include="..\..\converter\InputOverlay.cs" />
+    <Compile Include="..\..\converter\Converter.cs" />
+  </ItemGroup>
+
+</Project>

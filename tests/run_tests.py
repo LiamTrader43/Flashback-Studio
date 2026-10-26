@@ -1,5 +1,5 @@
-"""Runs Flashback Studio's PC tests (see README.md) against 3ds-app/source, and
-says which passed. Exits with 1 if any failed.
+"""Runs Flashback Studio's PC tests (see README.md) against 3ds-app/source and
+converter, and says which passed. Exits with 1 if any failed.
 
 usage: python run_tests.py [--cc COMPILER]
   --cc  a C compiler for this PC (default: gcc); on Windows, a MinGW gcc
@@ -25,6 +25,41 @@ def extract_ahead():
     start = src.rindex('// ----', 0, src.index('// Reading ahead\n'))
     end = src.rindex('// ----', 0, src.index('// Player\n', start))
     open(os.path.join(BUILD, 'ahead_extracted.c'), 'w', encoding='utf-8').write(src[start:end])
+
+
+def extract_overlay():
+    """main.c's input display, from its comment to the end of drawInputs, for
+    overlay_ref.c."""
+    src = open(MAIN_C, encoding='utf-8').read().replace('\r\n', '\n')
+    start = src.index('// The input display:')
+    end = src.index('\n}\n', src.index('static void drawInputs', start)) + 3
+    open(os.path.join(BUILD, 'overlay_extracted.c'), 'w', encoding='utf-8').write(src[start:end])
+
+
+def converter_test(cc):
+    """Builds overlay_ref and the converter test, and runs it in build/converter/;
+    returns whether it passed, or None if there's no .NET SDK to build it."""
+    dotnet = shutil.which('dotnet')
+    if dotnet is None:
+        print('No .NET SDK ("dotnet") found: skipped (see README.md).')
+        return None
+    extract_overlay()
+    ref = os.path.join(BUILD, 'overlay_ref' + EXE)
+    p = subprocess.run([cc, '-O2', '-I', SOURCE, '-I', BUILD, '-o', ref, os.path.join(HERE, 'overlay_ref.c'), '-lm'],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if p.returncode != 0:
+        print(p.stdout.rstrip() or f'{cc} failed, with no output')
+        return False
+    out = os.path.join(BUILD, 'converter_test')
+    p = subprocess.run([dotnet, 'build', os.path.join(HERE, 'converter_test', 'ConverterTest.csproj'), '-c', 'Release',
+                        '-o', out, '-nologo', '-v', 'quiet'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if p.returncode != 0:
+        print(p.stdout.rstrip() or 'dotnet build failed, with no output')
+        return False
+    work = os.path.join(BUILD, 'converter')
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    return subprocess.run([os.path.join(out, 'ConverterTest.exe'), ref], cwd=work).returncode == 0
 
 
 def build_and_run(cc, name, sources, flags=(), libs=()):
@@ -59,12 +94,15 @@ def main():
     extract_ahead()
     results.append(('read-ahead test', build_and_run(cc, 'ahead_test', [os.path.join(HERE, 'ahead_test.c')],
                                                      ['-I', BUILD], ['-lpthread'])))
+    print('\n=== converter test', flush=True)
+    results.append(('converter test', converter_test(cc)))
 
     print('\n=== summary')
     for name, ok in results:
-        print(f'  {"passed" if ok else "FAILED"}  {name}')
-    failed = [n for n, ok in results if not ok]
-    print('all passed' if not failed else f'{len(failed)} FAILED')
+        print(f'  {"passed" if ok else "skipped" if ok is None else "FAILED"}  {name}')
+    failed = [n for n, ok in results if ok is False]
+    skipped = [n for n, ok in results if ok is None]
+    print(f'{len(failed)} FAILED' if failed else f'the rest passed ({len(skipped)} skipped)' if skipped else 'all passed')
     sys.exit(1 if failed else 0)
 
 

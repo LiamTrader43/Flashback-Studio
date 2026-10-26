@@ -13,39 +13,51 @@ Tools for decompressing, converting, viewing and editing `.flb` clips recorded b
 
 | Tool | Status | What it does |
 |---|---|---|
-| `convert_flashback.bat` | Available (Windows) | Converts `.flb` clips into MP4 videos |
+| Flashback Converter | Available (Windows) | Converts `.flb` clips into MP4 videos, with the input display over them if you like |
 | Flashback Studio (3DS app) | Available (`.3dsx` or `.cia`) | Plays clips on the 3DS itself, with sound, and trims, renames and compacts them (to about half their size) |
 
 ## Converting clips to MP4 (Windows)
 
 ### What you need
 
-* **Windows.** The converter uses PowerShell, which comes with Windows. There's no macOS or Linux version yet.
-* **[ffmpeg](https://ffmpeg.org/download.html).** Its `bin` folder must be on your PATH: typing `ffmpeg` in a terminal should run it.
+* **Windows 10 or 11.** The converter uses .NET Framework 4.8, which comes with them. There's no macOS or Linux version yet.
+* That's all: the converter comes with [ffmpeg](https://ffmpeg.org), which does the video encoding.
 
 ### How to use it
 
-1. Download `convert_flashback.bat` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest).
+1. Download `FlashbackConverter.zip` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest), and extract it anywhere. Keep `ffmpeg.exe` next to `FlashbackConverter.exe`.
 2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC.
-3. Either:
-   * **drag** one or more clips onto `convert_flashback.bat`, or
-   * put `convert_flashback.bat` in the folder with your clips and **double-click** it to convert all of them.
+3. Open `FlashbackConverter.exe`, and drag clips, or folders of clips, into its window (or use **Add clips…** and **Add folder…**). Dragging them onto `FlashbackConverter.exe` itself opens it with them.
+4. Press **Convert**.
+
+The list shows each clip's length, resolution and frame rate, and whether it has sound and inputs. Then, as it goes, how converting each one went.
 
 Each clip becomes an MP4 next to it (`clip_<date>.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
 
-Clips that already have an MP4 are skipped, so it's safe to run again on the same folder. Clips compacted by the 3DS app, and clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it), convert the same way.
+**Input display.** With **Show the input display in the videos** ticked (it is to start with), clips recorded with their inputs show them in the video's bottom-left corner, just as Flashback Studio shows them: the buttons held during each frame, where the Circle Pad was, and where the touch screen was touched. Untick it for videos of just the game. Clips recorded before Flashback recorded the inputs convert without it.
+
+Clips that already have an MP4 are skipped, so it's safe to add the same folder again. To convert them again (with the input display switched off, for example), tick **Replace MP4s that already exist**. **Stop** stops converting: the clip being converted keeps the MP4 it had, if any, and the clips already done keep their new ones.
+
+Clips compacted or trimmed by the 3DS app, and clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it), convert the same way.
 
 ### If something goes wrong
 
+The Status column says why a clip can't be converted, or why converting it failed. Hold the mouse over a clip to see all of a long message.
+
 | Message | What to do |
 |---|---|
-| `ffmpeg was not found` | Install ffmpeg and add its `bin` folder to PATH, then open a new window and try again. |
-| `not a Flashback clip (or the copy is incomplete)`, `not a Flashback clip (file too small)` or `the file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
-| `made by a newer Flashback version` | Download `convert_flashback.bat` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
-| `... is damaged` or `the clip's frame count doesn't match its index` | The clip file is corrupted. Copy it from the SD card again; if that doesn't help, the recording itself was damaged. |
-| `ffmpeg failed` | ffmpeg's own message is shown just above it. The most common cause is a full disk. |
-| `its .txt is missing` / `couldn't read the resolution or frame rate from its .txt` | Only for older `.raw` clips: copy the `.txt` with the same name from the SD card next to the `.raw`. |
-| `Skipping ...: clip_<date>.mp4 already exists` | Already converted. Delete or rename the MP4 to convert the clip again. |
+| `ffmpeg.exe wasn't found` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackConverter.exe`. Opening the converter from inside the zip, without extracting it, doesn't work. |
+| Windows says "Windows protected your PC" | The converter isn't signed, so Windows doesn't know it. Click **More info**, then **Run anyway**. |
+| `Not a Flashback clip (or the copy is incomplete)`, `Not a Flashback clip (file too small)` or `The file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
+| `Made by a newer Flashback version` | Download Flashback Converter from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
+| `... is damaged` or `The clip's frame count doesn't match its index` | The clip file is corrupted. Copy it from the SD card again; if that doesn't help, the recording itself was damaged. |
+| `Failed: ffmpeg failed: ...` | ffmpeg's own message follows. The most common cause is a full disk. |
+| `Its .txt is missing` / `Couldn't read the resolution or frame rate from its .txt` | Only for older `.raw` clips: copy the `.txt` with the same name from the SD card next to the `.raw`. |
+| `Its MP4 already exists` | Already converted. Tick **Replace MP4s that already exist** to convert it again. |
+
+### Building it
+
+The converter is in [`converter/`](converter): a small Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build converter -c Release` builds `converter/bin/Release/net48/FlashbackConverter.exe`. To convert with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
 
 ## Watching clips on the 3DS
 
@@ -137,7 +149,7 @@ Select a clip and press R. The details under the list show how big it will be. C
 
 * **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
 * **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
-* **Compacted clips** play in the app and convert with `convert_flashback.bat` like any other clip, sound and inputs included (only the sound the clip's frames last is kept). Use the latest `convert_flashback.bat`: older copies don't know compacted clips.
+* **Compacted clips** play in the app and convert with Flashback Converter like any other clip, sound and inputs included (only the sound the clip's frames last is kept).
 
 ### Building it
 
@@ -147,7 +159,7 @@ Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS too
 
 The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
 
-[`tests/`](tests) has PC tests that run the app's own code: the clip reader and compactor, and the player's read-ahead. Run them with `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
+[`tests/`](tests) has PC tests that run the app's own code (the clip reader and compactor, and the player's read-ahead) and the converter's. Run them with `python tests/run_tests.py` (see [tests/README.md](tests/README.md) for what you need).
 
 ## The `.flb` clip format
 
