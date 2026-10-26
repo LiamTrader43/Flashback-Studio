@@ -27,7 +27,7 @@ namespace FlashbackStudio
 
         readonly TopScreen top = new TopScreen();
         readonly BottomScreen bottom = new BottomScreen();
-        readonly TextBox renameBox;
+        readonly TextBox renameBox, exportNameBox;     // (a new name being typed for a clip, or an export)
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 1 };
         readonly System.Windows.Forms.Timer previewTimer = new System.Windows.Forms.Timer { Interval = 120 };
         readonly ThumbLoader thumbs;
@@ -42,6 +42,7 @@ namespace FlashbackStudio
 
         // Exporting
         bool exportInputs = true, exportReplace;
+        string exportFolder;            // where exports go (null: next to their clips), remembered
         int exportFirst, exportCount;   // the frames to export (all of them, or a trimmed part)...
         string exportPath;              // ...of this clip
 
@@ -84,20 +85,8 @@ namespace FlashbackStudio
             MinimumSize = SizeFromClientSize(new Size(S(400) + hinge.Width + bottom.PanelWidth, 24 * bottom.RowH));
             StartPosition = FormStartPosition.CenterScreen;
 
-            renameBox = new TextBox
-            {
-                Visible = false,
-                BorderStyle = BorderStyle.None,
-                BackColor = Color.FromArgb(45, 45, 45),
-                ForeColor = Color.White,
-                Font = bottom.Regular,
-            };
-            bottom.Controls.Add(renameBox);
-            renameBox.TextChanged += (s, e) =>
-            {
-                renameError = null;
-                bottom.Invalidate();
-            };
+            renameBox = NameBox();
+            exportNameBox = NameBox();
 
             bottom.PaintScreen += PaintScreen;
             bottom.Resize += (s, e) =>
@@ -167,12 +156,32 @@ namespace FlashbackStudio
 
         readonly string startPath;
 
+        // A box on the bottom screen to type a name in.
+        TextBox NameBox()
+        {
+            TextBox box = new TextBox
+            {
+                Visible = false,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.FromArgb(45, 45, 45),
+                ForeColor = Color.White,
+                Font = bottom.Regular,
+            };
+            bottom.Controls.Add(box);
+            box.TextChanged += (s, e) =>
+            {
+                renameError = null;
+                bottom.Invalidate();
+            };
+            return box;
+        }
+
         // (Once the window exists, so the thumbnails read meanwhile can be handed to it.)
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
             LoadSettings(out string last);
-            if (startPath != null)
+            if (startPath != null && (File.Exists(startPath) || Directory.Exists(startPath)))
                 OpenPath(startPath);
             else
                 OpenFolder(StartFolder(last), null);
@@ -195,6 +204,8 @@ namespace FlashbackStudio
                     string name = eq > 0 ? line.Substring(0, eq) : "", value = eq > 0 ? line.Substring(eq + 1).Trim() : "";
                     if (name == "folder")
                         lastFolder = value;
+                    else if (name == "export")
+                        exportFolder = value.Length > 0 ? value : null;
                     else if (name == "volume" && int.TryParse(value, out int v))
                         volume = Math.Max(0, Math.Min(100, v));
                 }
@@ -209,7 +220,7 @@ namespace FlashbackStudio
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile));
-                File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume });
+                File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
             {
@@ -272,14 +283,9 @@ namespace FlashbackStudio
 
         void ChooseFolder()
         {
-            using (FolderBrowserDialog d = new FolderBrowserDialog
-            {
-                Description = "Open the folder with your clips (on a 3DS SD card: luma\\flashback)",
-                ShowNewFolderButton = false,
-                SelectedPath = folder ?? "",
-            })
-                if (d.ShowDialog(this) == DialogResult.OK)
-                    OpenFolder(d.SelectedPath, null);
+            string chosen = FolderPicker.Pick(this, "Open the folder with your clips (on a 3DS SD card: luma\\flashback)", folder);
+            if (chosen != null)
+                OpenFolder(chosen, null);
         }
 
         // Reads the folder again. Clips that are still there keep their
@@ -387,6 +393,7 @@ namespace FlashbackStudio
         void PaintScreen(Painter p)
         {
             renameBox.Visible = mode == Mode.Rename;
+            exportNameBox.Visible = mode == Mode.ConfirmExport;
             if (mode == Mode.Player)
                 PaintPlayer(p);
             else
@@ -483,27 +490,37 @@ namespace FlashbackStudio
                 {
                     bool part = exportCount < c.FrameCount;
                     p.Text(d, 1, Style.Info, part ? "Export the selection as an MP4?" : "Export this clip as an MP4?");
-                    p.Text(d + 1, 1, Style.Normal, Path.GetFileName(ExportMp4()));
-                    p.Text(d + 2, 1, Style.Normal, $"{c.Width * 2}x{c.Height * 2}, {Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")}");
-                    PaintInputsChoice(p, d + 3, c.HasInputs);
-                    if (!part && File.Exists(ExportMp4()))
-                        p.Text(d + 4, 1, Style.Warn, "Its MP4 already exists: it will be replaced.");
-                    Answers(p, "Export", Export, Cancel);
+                    p.Text(d + 1, 1, Style.Normal, "Name");
+                    exportNameBox.Bounds = Rectangle.Inflate(p.Cells(d + 1, 8, BottomScreen.Cols - 13), 0, -1);
+                    p.Text(d + 1, BottomScreen.Cols - 4, Style.Dim, ".mp4");
+                    PaintExportFolder(p, d + 2, "next to the clip");
+                    p.Text(d + 3, 1, Style.Normal, $"{c.Width * 2}x{c.Height * 2}, {Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")}");
+                    PaintInputsChoice(p, d + 4, c.HasInputs);
+                    string problem = ExportProblem();
+                    if (problem != null)
+                        p.Wrap(d + 5, d + 6, Style.Warn, problem, 1);
+                    else if (File.Exists(ExportMp4()))
+                        p.Wrap(d + 5, d + 6, Style.Warn, "There's already an MP4 with that name there: it will be replaced.", 1);
+                    Answers(p, "Export", problem == null ? Export : (Action)null, Cancel);
                     return;
                 }
                 case Mode.ConfirmExportAll:
                 {
-                    int ok = clips.Count(x => x.Error == null), have = clips.Count(x => x.Error == null && File.Exists(x.Mp4));
+                    int ok = clips.Count(x => x.Error == null), have = clips.Count(x => x.Error == null && File.Exists(TargetMp4(x)));
                     p.Text(d, 1, Style.Info, $"Export all {ok} clip{(ok == 1 ? "" : "s")} as MP4s?");
-                    p.Text(d + 1, 1, Style.Normal, "Each MP4 goes next to its clip.");
-                    PaintInputsChoice(p, d + 2, true);
-                    if (have > 0)
+                    PaintExportFolder(p, d + 1, "next to each clip");
+                    p.Text(d + 2, 1, Style.Dim, "Each MP4 is named after its clip.");
+                    PaintInputsChoice(p, d + 3, true);
+                    string problem = ExportFolderProblem();
+                    if (problem != null)
+                        p.Wrap(d + 4, d + 5, Style.Warn, problem, 1);
+                    else if (have > 0)
                     {
-                        string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4: ";
-                        p.Text(d + 3, 1, Style.Normal, text);
-                        Choice(p, d + 3, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
+                        string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4 there: ";
+                        p.Text(d + 4, 1, Style.Normal, text);
+                        Choice(p, d + 4, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
                     }
-                    Answers(p, "Export", Export, Cancel);
+                    Answers(p, "Export", problem == null ? Export : (Action)null, Cancel);
                     return;
                 }
                 case Mode.Rename:
@@ -534,7 +551,7 @@ namespace FlashbackStudio
                                                  $"Not compacted ({Names.Size(c.CompactSize)} once compacted)");
                     if (message == null)
                         p.Text(d + 5, 1, Style.Dim, (c.HasInputs ? "Inputs recorded" : "No inputs recorded") +
-                                                    (File.Exists(c.Mp4) ? "; exported (has an MP4)" : ""));
+                                                    (HasMp4(c) ? "; exported (has an MP4)" : ""));
                 }
             }
             if (message != null)
@@ -624,13 +641,18 @@ namespace FlashbackStudio
         // Does what 'key' does now; false if it does nothing. Everything has a
         // button; only playing (Space), a frame back and on (, and .) and a
         // second back and on (Left/Right) have keys too, while a clip is open.
-        // (And a name being typed is renamed to with Enter, as in any text box.)
+        // (And a name being typed is used with Enter, as in any text box.)
         bool HandleKey(Keys key)
         {
-            if (mode == Mode.Rename)
+            if (mode == Mode.Rename || mode == Mode.ConfirmExport)
             {
-                if (key == Keys.Enter)
+                if (key == Keys.Enter && mode == Mode.Rename)
                     Rename();
+                else if (key == Keys.Enter)
+                {
+                    if (ExportProblem() == null)
+                        Export();
+                }
                 else if (key == Keys.Escape)
                     Cancel();
                 else
@@ -842,13 +864,89 @@ namespace FlashbackStudio
 
         // ---- Exporting
 
-        // Where the export goes: next to the clip, as "<clip>.mp4", or for a
-        // trimmed part, "<clip>-trim.mp4" (or -trim2, ...).
+        // The folder exports go to: the one chosen, or the clips' own.
+        string ExportDir() => exportFolder ?? folder;
+
+        // Where the export being asked about goes: the name typed, in ExportDir.
         string ExportMp4()
         {
-            bool part = exportCount < Selected.FrameCount;
-            return part ? Path.Combine(folder, Names.FreeName(folder, Path.GetFileName(exportPath), ".mp4") ?? "trim.mp4")
-                        : Path.ChangeExtension(exportPath, ".mp4");
+            string name = exportNameBox.Text.Trim();
+            if (name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - 4);
+            return Path.Combine(ExportDir(), name + ".mp4");
+        }
+
+        // Where clip c's MP4 goes when every clip is exported.
+        string TargetMp4(ClipInfo c) => Path.Combine(ExportDir(), Path.GetFileNameWithoutExtension(c.Name) + ".mp4");
+
+        // Whether clip c has been exported (with its own name), next to it or where exports go.
+        bool HasMp4(ClipInfo c) => File.Exists(c.Mp4) || (exportFolder != null && File.Exists(TargetMp4(c)));
+
+        // Why the export folder can't be used, or null.
+        string ExportFolderProblem() =>
+            Directory.Exists(ExportDir()) ? null : "That folder isn't there any more: choose another (Change…).";
+
+        // Why the name typed can't be used, or null.
+        string ExportProblem()
+        {
+            string name = exportNameBox.Text.Trim();
+            if (name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - 4);
+            if (name.Length == 0)
+                return "Type a name for the MP4.";
+            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                return "A name can't have \\ / : * ? \" < > | in it.";
+            if (name.EndsWith("."))
+                return "The name can't end with a dot.";
+            if (Names.IsReserved(name))
+                return "Windows can't use that name (CON, PRN, AUX, NUL, COM0-9 and LPT0-9 are taken). Try another.";
+            return ExportFolderProblem();
+        }
+
+        // The export folder's row: where exports go, and buttons to change it
+        // (and to go back to next to the clips).
+        void PaintExportFolder(Painter p, int r, string standard)
+        {
+            p.Text(r, 1, Style.Normal, "Folder");
+            int right = BottomScreen.Cols - (exportFolder != null ? 17 : 9);     // (room for the buttons: 9 columns, and 7)
+            string shown = exportFolder ?? standard;
+            int room = right - 8 - 1;
+            if (shown.Length > room)
+                shown = "…" + shown.Substring(shown.Length - (room - 1));
+            p.Text(r, 8, exportFolder != null ? Style.Normal : Style.Dim, shown);
+            int col = Choice(p, r, right, "Change…", ChooseExportFolder, false);
+            if (exportFolder != null)
+                Choice(p, r, col + 1, "Reset", () => SetExportFolder(null), false);
+        }
+
+        void ChooseExportFolder()
+        {
+            string chosen = FolderPicker.Pick(this, "Export the MP4s to this folder", ExportDir());
+            if (chosen != null)
+                SetExportFolder(chosen);
+            if (mode == Mode.ConfirmExport)
+                exportNameBox.Focus();
+        }
+
+        // Where exports go from now on (null: next to their clips), remembered.
+        void SetExportFolder(string dir)
+        {
+            exportFolder = dir;
+            SaveSettings();
+            bottom.Invalidate();
+        }
+
+        // Asks about exporting frames exportFirst .. exportFirst + exportCount - 1
+        // of exportPath, with 'name' to start with, in the box to type another.
+        void AskExportName(string name)
+        {
+            exportNameBox.Text = name;
+            mode = Mode.ConfirmExport;
+            bottom.Invalidate();
+            bottom.Update();    // (places the box)
+            exportNameBox.Visible = true;
+            exportNameBox.Focus();
+            exportNameBox.SelectAll();
         }
 
         void ToggleExportInputs()
@@ -879,8 +977,7 @@ namespace FlashbackStudio
             exportPath = c.Path;
             exportFirst = 0;
             exportCount = c.FrameCount;
-            mode = Mode.ConfirmExport;
-            bottom.Invalidate();
+            AskExportName(Path.GetFileNameWithoutExtension(c.Name));
         }
 
         void AskExportAll()
@@ -919,7 +1016,9 @@ namespace FlashbackStudio
             }
 
             List<ClipInfo> all = clips.Where(c => c.Error == null).ToList();
-            List<ClipInfo> todo = all.Where(c => exportReplace || !File.Exists(c.Mp4)).ToList();
+            if (ExportFolderProblem() != null)
+                return;
+            List<ClipInfo> todo = all.Where(c => exportReplace || !File.Exists(TargetMp4(c))).ToList();
             int skipped = all.Count - todo.Count;
             mode = Mode.List;
             if (todo.Count == 0)
@@ -939,7 +1038,7 @@ namespace FlashbackStudio
                     try
                     {
                         using (FlbClip clip = FlbClip.Open(c.Path))
-                            Converter.ToMp4(clip, c.Mp4, inputs, ffmpeg,
+                            Converter.ToMp4(clip, TargetMp4(c), inputs, ffmpeg,
                                             done => Progress((before + done) / (double)total, $"Frame {done} of {c.FrameCount}"), token);
                         exported++;
                     }
@@ -1206,7 +1305,8 @@ namespace FlashbackStudio
                 return;
             selected = i;
             ClampList();
-            mode = Mode.ConfirmExport;
+            string stem = Path.GetFileNameWithoutExtension(exportPath);
+            AskExportName(part ? Path.GetFileNameWithoutExtension(Names.FreeName(ExportDir(), stem + ".mp4", ".mp4") ?? stem + "-trim") : stem);
             bottom.Invalidate();
         }
 

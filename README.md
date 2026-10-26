@@ -55,12 +55,14 @@ Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, 
 
 ### Exporting MP4s
 
-**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 goes next to its clip (`clip_<date>.mp4`; a trimmed selection's as `<name>-trim.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 is H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
 
 Before it starts, it asks:
 
+* **Name** (exporting one clip or a selection): type the MP4's name. It starts as the clip's (`clip_<date>`, or `<name>-trim` for a selection). If there's already an MP4 with that name in the folder, it says it will be replaced.
+* **Folder:** where the MP4s go. To start with, that's next to the clips. **Change…** picks another folder, which is remembered for next time, and **Reset** goes back to next to the clips.
 * **Input display** (click **on**/**off** to change it; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
-* **Exporting every clip:** clips that already have an MP4 are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
+* **Exporting every clip:** each MP4 is named after its clip. Clips that already have an MP4 in the folder are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
 
 **Cancel** stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
 

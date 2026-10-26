@@ -81,7 +81,7 @@ namespace FlashbackStudio
 
         // Windows reserves these names (before the first dot, whatever the case)
         // for devices.
-        static bool IsReserved(string name)
+        public static bool IsReserved(string name)
         {
             string stem = name.Split('.')[0].ToUpperInvariant();
             return stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" ||
