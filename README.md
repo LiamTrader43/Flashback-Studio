@@ -39,7 +39,7 @@ It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-th
 
 The clip list's buttons: **Play**, **Trim**, **Export** (an MP4, see below), **Compact** (asks first), **Rename** (spaces become dashes; names Windows can't use are refused), **Delete** (asks first: it goes to the Recycle Bin, or on an SD card, is deleted for good), **Refresh** (reads the folder again), **Export all** and **Open folder**. The mouse wheel scrolls the grid.
 
-While a clip plays, three things have keys too:
+The player has a media player's buttons: a second back, a frame back, play/pause, a frame forward and a second forward. Those also have keys (written under them):
 
 | Key | |
 |---|---|
@@ -47,9 +47,9 @@ While a clip plays, three things have keys too:
 | , / . | Previous/next frame (pauses; hold to repeat) |
 | Left/Right | Back/forward 1 second |
 
-The player's buttons also change the speed (**Slower**, **Faster**: 1/4x, 1/2x, 1x, 2x), and open the **Settings** (Loop, Input display, Timing details), **Trim**, **Export as MP4**, or go **Back to the clip list**. Click or drag along the bar to jump there. The volume slider sets the player's volume (exported MP4s have the sound as recorded); it's remembered for next time.
+Under them, the speed (1/4x, 1/2x, 1x, 2x), and buttons for the **Settings** (Loop, Input display, Timing details), **Trim**, **Export as MP4** and **Back to the clip list**. Click or drag along the bar to jump there. The volume slider sets the player's volume (exported MP4s have the sound as recorded); it's remembered for next time. Hold the mouse over a button to see what it does, at the bottom of the screen.
 
-While trimming, the same keys work, and the buttons set the **Start here** and **End here** of the selection, **Save as a new clip** (asks first), turn the **Loop** on and off, **Export the selection as MP4**, or **Stop trimming**.
+While trimming, the same keys work, and the buttons set the **Start here** and **End here** of the selection, **Save as a new clip** (asks first), turn the **Loop** on and off, **Export the selection** as an MP4, or **Stop trimming**.
 
 Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting, trimming, renaming and deleting do exactly what they do on the 3DS, and write exactly the same clips, so clips can go back and forth between the two. **Cancel** stops compacting or trimming at any time, and leaves the clip as it was.
 

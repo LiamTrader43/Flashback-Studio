@@ -23,7 +23,7 @@ namespace FlashbackStudio
 
         const int GridCols = 3;
         const int DetailRows = 7;
-        const int HintRows = 3;
+        const int HintRows = 4;
 
         readonly TopScreen top = new TopScreen();
         readonly BottomScreen bottom = new BottomScreen();
@@ -80,7 +80,7 @@ namespace FlashbackStudio
             Controls.Add(top);
             Controls.Add(hinge);
             Controls.Add(bottom);
-            ClientSize = new Size(S(800) + hinge.Width + bottom.PanelWidth, Math.Max(S(480), 28 * bottom.RowH));
+            ClientSize = new Size(S(800) + hinge.Width + bottom.PanelWidth, Math.Max(S(480), 30 * bottom.RowH));
             MinimumSize = SizeFromClientSize(new Size(S(400) + hinge.Width + bottom.PanelWidth, 24 * bottom.RowH));
             StartPosition = FormStartPosition.CenterScreen;
 
@@ -395,12 +395,34 @@ namespace FlashbackStudio
 
         static string Sentence(string s) => s.Length > 0 ? char.ToUpperInvariant(s[0]) + s.Substring(1) : s;
 
-        // A row of buttons: each what it does, and its action.
-        static void Buttons(Painter p, int r, params (string Label, Action Click)[] buttons)
+        // A row of buttons, in four columns across the screen: each what it does
+        // and its action. The first is red if 'main' (the screen's main button).
+        // 'line' is which of the bottom screen's rows of buttons (0 to 2).
+        void Buttons(Painter p, int line, bool main, params (string Label, Action Click)[] buttons)
         {
-            int col = 1;
-            foreach ((string label, Action click) in buttons)
-                col = p.Button(r, col, label, click) + 1;
+            int h = (HintRows * p.RowH - S(4)) / 3;
+            Rectangle band = p.Band((p.Rows - HintRows) * p.RowH + S(2) + line * h, h - S(4));
+            Rectangle[] boxes = p.Split(band, 4, S(5));
+            for (int i = 0; i < buttons.Length; i++)
+                p.Button(boxes[i], buttons[i].Label, buttons[i].Click, i == 0 && main ? Look.Red : Look.Normal);
+        }
+
+        // A question's answers: the main one (red), and Cancel.
+        void Answers(Painter p, string answer, Action yes, Action no)
+        {
+            int h = (HintRows * p.RowH - S(4)) / 3;
+            Rectangle[] boxes = p.Split(p.Band((p.Rows - HintRows) * p.RowH + S(2), h - S(4)), 3, S(5));
+            if (answer != null)
+                p.Button(boxes[0], answer, yes, Look.Red);
+            p.Button(boxes[answer != null ? 1 : 0], "Cancel", no);
+        }
+
+        // A small button in a line of text (to change a choice), at row r, column col.
+        int Choice(Painter p, int r, int col, string label, Action click, bool on)
+        {
+            Rectangle at = p.Cells(r, col, label.Length + 2);
+            p.Button(new Rectangle(at.X, at.Y + S(1), at.Width, at.Height - S(2)), label, click, on ? Look.Red : Look.Normal);
+            return col + label.Length + 2;
         }
 
         void PaintList(Painter p)
@@ -442,20 +464,20 @@ namespace FlashbackStudio
                     p.Text(d + 1, 1, Style.Normal, jobName ?? "");
                     PaintProgress(p, d + 2, jobDone);
                     p.Text(d + 3, 1, Style.Normal, jobDetail ?? "");
-                    Buttons(p, hints, ("Cancel", CancelJob));
+                    Answers(p, null, null, CancelJob);
                     return;
                 case Mode.ConfirmDelete:
                     p.Text(d, 1, Style.Warn, "Delete this clip?");
                     p.Text(d + 1, 1, Style.Normal, c.Name);
                     p.Text(d + 2, 1, Style.Normal, IsRemovable(c.Path) ? "It can't be undone (it's on a removable drive)." : "It goes to the Recycle Bin.");
-                    Buttons(p, hints, ("Delete", Delete), ("Cancel", Cancel));
+                    Answers(p, "Delete", Delete, Cancel);
                     return;
                 case Mode.ConfirmCompact:
                     p.Text(d, 1, Style.Info, "Compact this clip?");
                     p.Text(d + 1, 1, Style.Normal, c.Name);
                     p.Text(d + 2, 1, Style.Normal, $"{Names.Size(c.FileSize)} -> {Names.Size(c.CompactSize)}");
                     p.Wrap(d + 3, d + 5, Style.Normal, "Remove empty space between frames. The same video but smaller.", 1);
-                    Buttons(p, hints, ("Compact", Compact), ("Cancel", Cancel));
+                    Answers(p, "Compact", Compact, Cancel);
                     return;
                 case Mode.ConfirmExport:
                 {
@@ -466,7 +488,7 @@ namespace FlashbackStudio
                     PaintInputsChoice(p, d + 3, c.HasInputs);
                     if (!part && File.Exists(ExportMp4()))
                         p.Text(d + 4, 1, Style.Warn, "Its MP4 already exists: it will be replaced.");
-                    Buttons(p, hints, ("Export", Export), ("Cancel", Cancel));
+                    Answers(p, "Export", Export, Cancel);
                     return;
                 }
                 case Mode.ConfirmExportAll:
@@ -479,9 +501,9 @@ namespace FlashbackStudio
                     {
                         string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4: ";
                         p.Text(d + 3, 1, Style.Normal, text);
-                        p.Button(d + 3, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace);
+                        Choice(p, d + 3, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
                     }
-                    Buttons(p, hints, ("Export", Export), ("Cancel", Cancel));
+                    Answers(p, "Export", Export, Cancel);
                     return;
                 }
                 case Mode.Rename:
@@ -491,7 +513,7 @@ namespace FlashbackStudio
                         p.Wrap(d + 2, d + 4, Style.Warn, renameError, 1);
                     else
                         p.Text(d + 2, 1, Style.Dim, "Spaces become dashes.");
-                    Buttons(p, hints, ("Rename", Rename), ("Cancel", Cancel));
+                    Answers(p, "Rename", Rename, Cancel);
                     return;
             }
 
@@ -520,19 +542,22 @@ namespace FlashbackStudio
 
             if (clips.Count > 0)
             {
-                Buttons(p, hints, ("Play", Play), ("Trim", Trim), ("Export", AskExport), ("Compact", AskCompact));
-                Buttons(p, hints + 1, ("Rename", StartRename), ("Delete", AskDelete), ("Refresh", RefreshList));
-                Buttons(p, hints + 2, ("Export all", AskExportAll), ("Open folder", ChooseFolder));
+                bool can = c != null && c.Error == null;
+                Buttons(p, 0, true, ("Play", can ? Play : (Action)null), ("Trim", can && !c.IsRaw ? Trim : (Action)null),
+                        ("Export", can ? AskExport : (Action)null), ("Compact", can && !c.IsRaw && !c.IsCompacted ? AskCompact : (Action)null));
+                Buttons(p, 1, false, ("Rename", c != null && !c.IsRaw ? StartRename : (Action)null), ("Delete", AskDelete),
+                        ("Refresh", RefreshList), ("Open folder", ChooseFolder));
+                Buttons(p, 2, false, ("Export all", AskExportAll));
             }
             else
-                Buttons(p, hints + 2, ("Open folder", ChooseFolder), ("Refresh", RefreshList));
+                Buttons(p, 0, false, ("Open folder", ChooseFolder), ("Refresh", RefreshList));
         }
 
         void PaintInputsChoice(Painter p, int r, bool any)
         {
             const string label = "Input display: ";
             p.Text(r, 1, Style.Normal, label);
-            int col = p.Button(r, 1 + label.Length, exportInputs ? "on" : "off", ToggleExportInputs);
+            int col = Choice(p, r, 1 + label.Length, exportInputs ? "on" : "off", ToggleExportInputs, exportInputs);
             if (!any)
                 p.Text(r, col + 1, Style.Dim, "(no inputs in this clip)");
         }
@@ -1268,15 +1293,6 @@ namespace FlashbackStudio
             });
         }
 
-        // A row of the player's buttons: each what it does, the key that does
-        // the same (or null), and its action (null: greyed out).
-        void PlayerButtons(Painter p, int r, params (string Label, string Key, Action Click)[] buttons)
-        {
-            int col = 1;
-            foreach ((string label, string key, Action click) in buttons)
-                col = p.Button(r, col, label, WithPlayer(click), key) + 1;
-        }
-
         // An action on the player, then both screens brought up to date.
         Action WithPlayer(Action action) => action == null ? null : (Action)(() =>
         {
@@ -1342,54 +1358,86 @@ namespace FlashbackStudio
                 {
                     const string ask = "Save it as a new clip? ";
                     p.Text(15, 1, Style.Key, ask);
-                    int c2 = p.Button(15, 1 + ask.Length, "Save", SaveSelection) + 1;
-                    p.Button(15, c2, "No", () => { askSave = false; bottom.Invalidate(); });
+                    int c2 = Choice(p, 15, 1 + ask.Length, "Save", SaveSelection, true) + 1;
+                    Choice(p, 15, c2, "No", () => { askSave = false; bottom.Invalidate(); }, false);
                 }
                 else if (pl.TrimMessage != null)
                     p.Text(15, 1, Style.Warn, pl.TrimMessage);
             }
 
-            int sep = 17, r = sep + 1;
+            int sep = 17;
             p.Text(sep, 0, Style.Dim, new string('-', BottomScreen.Cols));
+            int y = (sep + 1) * p.RowH + S(4), gap = S(6);
             if (pl.SettingsOpen)
             {
                 // The settings, over the buttons while they're open.
-                p.Text(r++, 1, Style.Info, "Settings");
+                p.Text(sep + 1, 1, Style.Info, "Settings");
+                y += p.RowH;
                 bool[] on = { pl.Loop, pl.ShowInputs, pl.ShowStats };
                 for (int i = 0; i < SettingNames.Length; i++)
                 {
                     int item = i;
-                    string text = $"{SettingNames[i],-15} {(on[i] ? "on" : "off"),-3}" +
-                                  (i == 1 && clip.Inputs == null ? " (none in this clip)" : "");
-                    p.Button(r++, 1, text, WithPlayer(() => ToggleSetting(item)), width: BottomScreen.Cols - 2);
+                    p.Switch(p.Band(y, S(28)), SettingNames[i], on[i], WithPlayer(() => ToggleSetting(item)),
+                             i == 1 && clip.Inputs == null ? "(none in this clip)" : null);
+                    y += S(28) + S(4);
                 }
-                r++;
-                PlayerButtons(p, r, ("Close", null, () => player.SettingsOpen = false));
-            }
-            else if (pl.TrimMode)
-            {
-                PlayerButtons(p, r++, (pl.Playing ? "Pause" : "Play the selection", "Space", pl.PlayPause));
-                PlayerButtons(p, r++, ("< Frame", ",", () => pl.Step(-1)), ("Frame >", ".", () => pl.Step(1)));
-                PlayerButtons(p, r++, ("< 1 s", "Left", () => pl.Jump(-1)), ("1 s >", "Right", () => pl.Jump(1)));
-                PlayerButtons(p, r++, ("Start here", null, pl.SetTrimIn), ("End here", null, pl.SetTrimOut));
-                PlayerButtons(p, r++, ("Save as a new clip", null, AskSave));
-                PlayerButtons(p, r++, (pl.Loop ? "Loop on" : "Loop off", null, ToggleLoop));
-                r++;
-                PlayerButtons(p, r++, ("Export the selection as MP4", null, ExportFromPlayer), ("Stop trimming", null, pl.ToggleTrim));
+                y += gap;
+                p.Button(p.Split(p.Band(y, S(28)), 3, gap)[0], "Close", WithPlayer(() => player.SettingsOpen = false));
             }
             else
             {
-                PlayerButtons(p, r++, (pl.Playing ? "Pause" : "Play", "Space", pl.PlayPause));
-                PlayerButtons(p, r++, ("< Frame", ",", () => pl.Step(-1)), ("Frame >", ".", () => pl.Step(1)));
-                PlayerButtons(p, r++, ("< 1 s", "Left", () => pl.Jump(-1)), ("1 s >", "Right", () => pl.Jump(1)));
-                PlayerButtons(p, r++, ("Slower", null, pl.Speed > 0 ? () => pl.ChangeSpeed(-1) : (Action)null),
-                                 ("Faster", null, pl.Speed + 1 < Player.SpeedNames.Length ? () => pl.ChangeSpeed(1) : (Action)null));
-                r++;
-                PlayerButtons(p, r++, ("Settings", null, () => pl.SettingsOpen = true), ("Trim", null, pl.Clip.IsRaw ? null : (Action)pl.ToggleTrim),
-                                 ("Export as MP4", null, ExportFromPlayer));
-                PlayerButtons(p, r++, ("Back to the clip list", null, ClosePlayer));
+                // Like a media player's: a second back, a frame back, play/pause, a
+                // frame on, a second on; with their keys under them.
+                Rectangle[] t = p.Split(p.Band(y, S(34)), 5, gap);
+                string play = pl.Playing ? "Pause" : pl.TrimMode ? "Play the selection" : "Play";
+                p.Button(t[0], null, WithPlayer(() => pl.Jump(-1)), glyph: Glyph.SecondBack, tip: "Back 1 second (Left)");
+                p.Button(t[1], null, WithPlayer(() => pl.Step(-1)), glyph: Glyph.FrameBack, tip: "Previous frame (,)");
+                p.Button(t[2], null, WithPlayer(pl.PlayPause), Look.Red, pl.Playing ? Glyph.Pause : Glyph.Play, play + " (Space)");
+                p.Button(t[3], null, WithPlayer(() => pl.Step(1)), glyph: Glyph.FrameOn, tip: "Next frame (.)");
+                p.Button(t[4], null, WithPlayer(() => pl.Jump(1)), glyph: Glyph.SecondOn, tip: "Forward 1 second (Right)");
+                y += S(34) + S(2);
+                string[] keys = { "Left", ",", "Space", ".", "Right" };
+                for (int i = 0; i < 5; i++)
+                    p.TextIn(new Rectangle(t[i].X, y, t[i].Width, p.RowH), keys[i], Theme.Fore(Style.Dim), bottom.Regular);
+                y += p.RowH + gap;
+
+                if (pl.TrimMode)
+                {
+                    Rectangle[] a = p.Split(p.Band(y, S(28)), 2, gap);
+                    p.Button(a[0], "Start here", WithPlayer(pl.SetTrimIn), tip: "Start the selection at this frame");
+                    p.Button(a[1], "End here", WithPlayer(pl.SetTrimOut), tip: "End the selection at this frame");
+                    y += S(28) + gap;
+                    a = p.Split(p.Band(y, S(28)), 2, gap);
+                    p.Button(a[0], "Save as a new clip", WithPlayer(AskSave), Look.Red, tip: "Save the selection next to this clip, as <name>-trim.flb");
+                    p.Button(a[1], pl.Loop ? "Loop: on" : "Loop: off", WithPlayer(ToggleLoop), tip: "Play the selection over and over, or once");
+                    y += S(28) + gap;
+                    a = p.Split(p.Band(y, S(28)), 2, gap);
+                    p.Button(a[0], "Export the selection", WithPlayer(ExportFromPlayer), tip: "Export the selection as an MP4");
+                    p.Button(a[1], "Stop trimming", WithPlayer(pl.ToggleTrim));
+                }
+                else
+                {
+                    // The speed: one of four.
+                    Rectangle band = p.Band(y, S(26));
+                    p.TextIn(new Rectangle(band.X, band.Y, 7 * p.CellW, band.Height), "Speed", Theme.Fore(Style.Normal), bottom.Regular, true);
+                    Rectangle[] speeds = p.Split(new Rectangle(band.X + 7 * p.CellW, band.Y, band.Width - 7 * p.CellW, band.Height), 4, S(4));
+                    for (int i = 0; i < speeds.Length; i++)
+                    {
+                        int speed = i;
+                        p.Button(speeds[i], Player.SpeedNames[i], WithPlayer(() => pl.ChangeSpeed(speed - pl.Speed)),
+                                 i == pl.Speed ? Look.Red : Look.Normal, tip: i == Player.SpeedNormal ? "Play at normal speed (with sound)" :
+                                                                         $"Play at {Player.SpeedNames[i]} speed (without sound)");
+                    }
+                    y += S(26) + gap + S(4);
+                    Rectangle[] a = p.Split(p.Band(y, S(28)), 3, gap);
+                    p.Button(a[0], "Settings", WithPlayer(() => pl.SettingsOpen = true), tip: "Loop, input display, timing details");
+                    p.Button(a[1], "Trim", pl.Clip.IsRaw ? null : WithPlayer(pl.ToggleTrim), tip: "Keep part of the clip");
+                    p.Button(a[2], "Export as MP4", WithPlayer(ExportFromPlayer), tip: "Export the clip as an MP4 video");
+                    y += S(28) + gap;
+                    p.Button(p.Band(y, S(28)), "Back to the clip list", WithPlayer(ClosePlayer));
+                }
             }
-            p.Text(Math.Max(r + 1, p.Rows - 1), 1, Style.Dim, "Click or drag along the bar to jump.");
+            p.Text(p.Rows - 1, 1, Style.Dim, p.Tip ?? "Click or drag along the bar to jump.");
         }
 
         // ---- Closing

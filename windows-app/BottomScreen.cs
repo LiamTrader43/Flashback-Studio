@@ -8,6 +8,12 @@ namespace FlashbackStudio
     // The colours of the 3DS app's bottom screen (main.c's C_* and COLOR_*).
     enum Style { Normal, Title, Selected, Dim, Key, Warn, Info }
 
+    // How a button looks: grey, or red (the screen's main button, or one that's on).
+    enum Look { Normal, Red }
+
+    // The pictures on the player's buttons.
+    enum Glyph { None, Play, Pause, FrameBack, FrameOn, SecondBack, SecondOn }
+
     static class Theme
     {
         public static readonly Color Red = Color.FromArgb(204, 26, 31);        // the logo's red: the title bar, and what's played
@@ -19,9 +25,11 @@ namespace FlashbackStudio
         public static readonly Color Damaged = Color.FromArgb(110, 20, 20);    // ...or that can't be
         public static readonly Color Cut = Color.FromArgb(20, 20, 20);         // trimming: the bar outside the selection...
         public static readonly Color Mark = Color.FromArgb(255, 200, 0);       // ...and its start and end
-        public static readonly Color Button = Color.FromArgb(52, 52, 52);      // a button...
-        public static readonly Color ButtonEdge = Color.FromArgb(110, 110, 110);
-        public static readonly Color ButtonOff = Color.FromArgb(28, 28, 28);   // ...one that can't be pressed now
+        public static readonly Color Button = Color.FromArgb(44, 44, 44);      // a button...
+        public static readonly Color ButtonHover = Color.FromArgb(68, 68, 68); // ...under the mouse...
+        public static readonly Color ButtonOff = Color.FromArgb(26, 26, 26);   // ...that can't be pressed now...
+        public static readonly Color RedHover = Color.FromArgb(232, 52, 58);   // ...and a red one (the main one, or one that's on) under the mouse
+        public static readonly Color SwitchOff = Color.FromArgb(85, 85, 85);
 
         public static Color Fore(Style s)
         {
@@ -50,7 +58,7 @@ namespace FlashbackStudio
     {
         public const int Cols = 48;
 
-        public readonly Font Regular, Strong;
+        public readonly Font Regular, Strong, Label;   // (Label: the buttons')
         public readonly int CellW, RowH, Pad;
 
         public event Action<Painter> PaintScreen;
@@ -74,6 +82,7 @@ namespace FlashbackStudio
             BackColor = Color.Black;
             Regular = new Font("Consolas", 10f);
             Strong = new Font("Consolas", 10f, FontStyle.Bold);
+            Label = new Font("Segoe UI Semibold", 9f);
             Size ten = TextRenderer.MeasureText("MMMMMMMMMM", Regular, Size.Empty, TextFormatFlags.NoPadding);
             CellW = ten.Width / 10;
             RowH = ten.Height + 2;
@@ -227,43 +236,29 @@ namespace FlashbackStudio
             return r;
         }
 
-        // A button on row r: 'label' in a box, with the key that does the same
-        // (if any) after it, dimmer. Under the mouse (or 'lit': the setting
-        // chosen with the keys) it lights up in the selected style, and it's
-        // greyed out with no 'click'. 'width' makes it at least that many
-        // columns wide. Returns the column after it.
-        public int Button(int r, int col, string label, Action click, string key = null, bool lit = false, int width = 0)
+        public int S(int px) => px * s.DeviceDpi / 96;
+
+        // What the button under the mouse does, if it says (set as buttons are drawn).
+        public string Tip;
+
+        // The width of the screen's text, from y down, 'height' high.
+        public Rectangle Band(int y, int height) => new Rectangle(s.Pad, y, BottomScreen.Cols * s.CellW, height);
+
+        // 'band' cut into n side by side, 'gap' apart.
+        public Rectangle[] Split(Rectangle band, int n, int gap)
         {
-            int cols = Math.Max(width, label.Length + (key != null ? key.Length + 1 : 0) + 2);
-            Rectangle at = s.Cells(r, col, cols);
-            Rectangle box = new Rectangle(at.X, at.Y + 1, at.Width - 1, at.Height - 3);
-            bool on = lit || (click != null && box.Contains(s.mouse));
-            Color face = on ? Theme.Back(Style.Selected).Value : click == null ? Theme.ButtonOff : Theme.Button;
-            Color edge = on ? Color.White : Theme.ButtonEdge;
-            using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(box, Math.Max(3, s.CellW / 2)))
-            using (Brush b = new SolidBrush(face))
-            using (Pen pen = new Pen(edge))
+            Rectangle[] parts = new Rectangle[n];
+            for (int i = 0; i < n; i++)
             {
-                G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                G.FillPath(b, path);
-                G.DrawPath(pen, path);
-                G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+                int x0 = band.X + (band.Width + gap) * i / n, x1 = band.X + (band.Width + gap) * (i + 1) / n - gap;
+                parts[i] = new Rectangle(x0, band.Y, x1 - x0, band.Height);
             }
-            Color fore = on ? Color.Black : click == null ? Theme.Fore(Style.Dim) : Color.White;
-            TextRenderer.DrawText(G, label, s.Regular, new Point(at.X + s.CellW, at.Y + 1), fore,
-                                  TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-            if (key != null)
-                TextRenderer.DrawText(G, key, s.Regular, new Point(at.X + (label.Length + 2) * s.CellW, at.Y + 1),
-                                      on ? Color.FromArgb(90, 90, 90) : Theme.Fore(Style.Dim),
-                                      TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
-            if (click != null)
-                Clickable(box, click);
-            return col + cols;
+            return parts;
         }
 
         static System.Drawing.Drawing2D.GraphicsPath Rounded(Rectangle box, int radius)
         {
-            int d = radius * 2;
+            int d = Math.Min(radius * 2, Math.Min(box.Width, box.Height));
             System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
             path.AddArc(box.X, box.Y, d, d, 180, 90);
             path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
@@ -271,6 +266,105 @@ namespace FlashbackStudio
             path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
             path.CloseFigure();
             return path;
+        }
+
+        // A rounded box, smoothed.
+        public void Box(Rectangle box, Color color, int radius)
+        {
+            G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(box, radius))
+            using (Brush b = new SolidBrush(color))
+                G.FillPath(b, path);
+            G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+        }
+
+        // Text in the middle of 'box' (or at its left, with 'left').
+        public void TextIn(Rectangle box, string text, Color color, Font font = null, bool left = false)
+        {
+            TextRenderer.DrawText(G, text, font ?? s.Label, box, color,
+                                  (left ? TextFormatFlags.Left : TextFormatFlags.HorizontalCenter) | TextFormatFlags.VerticalCenter |
+                                  TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        }
+
+        // A button filling 'box': its label (or picture) in the middle, lighter
+        // under the mouse, and darker, its label dim, with no 'click'. 'tip'
+        // says what it does, at the bottom of the screen while the mouse is on
+        // it.
+        public void Button(Rectangle box, string label, Action click, Look look = Look.Normal, Glyph glyph = Glyph.None, string tip = null)
+        {
+            bool hover = click != null && box.Contains(s.mouse);
+            Color face = click == null ? Theme.ButtonOff : look == Look.Red ? (hover ? Theme.RedHover : Theme.Red) :
+                         hover ? Theme.ButtonHover : Theme.Button;
+            Color fore = click == null ? Theme.Fore(Style.Dim) : Color.White;
+            Box(box, face, S(4));
+            if (glyph != Glyph.None)
+                DrawGlyph(glyph, box, fore);
+            if (label != null)
+                TextIn(box, label, fore);
+            if (click != null)
+                Clickable(box, click);
+            if (hover && tip != null)
+                Tip = tip;
+        }
+
+        // A setting that's on or off, filling 'box': its name at the left, and a
+        // switch at the right, red when it's on. Clicking anywhere on it changes it.
+        public void Switch(Rectangle box, string name, bool on, Action click, string note = null)
+        {
+            bool hover = box.Contains(s.mouse);
+            Box(box, hover ? Theme.ButtonHover : Theme.Button, S(4));
+            TextIn(new Rectangle(box.X + S(10), box.Y, box.Width - S(70), box.Height), name, Color.White, null, true);
+            if (note != null)
+                TextIn(new Rectangle(box.X + S(120), box.Y, box.Width - S(180), box.Height), note, Theme.Fore(Style.Dim), null, true);
+            Rectangle pill = new Rectangle(box.Right - S(54), box.Y + (box.Height - S(18)) / 2, S(44), S(18));
+            Box(pill, on ? Theme.Red : Theme.SwitchOff, S(9));
+            TextIn(pill, on ? "on" : "off", Color.White);
+            Clickable(box, click);
+        }
+
+        // A picture for a player button: play, pause, a frame back or on, a
+        // second back or on (the usual media player ones).
+        void DrawGlyph(Glyph glyph, Rectangle box, Color color)
+        {
+            float h = Math.Min(box.Height, box.Width) * 0.42f, cx = box.X + box.Width / 2f, cy = box.Y + box.Height / 2f;
+            float w = h * 0.86f, bar = Math.Max(2f, h * 0.18f);
+            G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (Brush b = new SolidBrush(color))
+            {
+                // A triangle pointing right (or left), its flat side at x.
+                void Triangle(float x, bool right)
+                {
+                    float point = right ? x + w : x - w;
+                    G.FillPolygon(b, new[] { new PointF(x, cy - h / 2), new PointF(x, cy + h / 2), new PointF(point, cy) });
+                }
+                switch (glyph)
+                {
+                    case Glyph.Play:
+                        Triangle(cx - w * 0.4f, true);
+                        break;
+                    case Glyph.Pause:
+                        G.FillRectangle(b, cx - bar * 1.6f, cy - h / 2, bar * 1.1f, h);
+                        G.FillRectangle(b, cx + bar * 0.5f, cy - h / 2, bar * 1.1f, h);
+                        break;
+                    case Glyph.FrameOn:
+                        Triangle(cx - (w + bar * 1.5f) / 2, true);
+                        G.FillRectangle(b, cx + (w + bar * 1.5f) / 2 - bar, cy - h / 2, bar, h);
+                        break;
+                    case Glyph.FrameBack:
+                        G.FillRectangle(b, cx - (w + bar * 1.5f) / 2, cy - h / 2, bar, h);
+                        Triangle(cx + (w + bar * 1.5f) / 2, false);
+                        break;
+                    case Glyph.SecondOn:
+                        Triangle(cx - w, true);
+                        Triangle(cx, true);
+                        break;
+                    case Glyph.SecondBack:
+                        Triangle(cx, false);
+                        Triangle(cx + w, false);
+                        break;
+                }
+            }
+            G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
         }
 
         public void Clickable(Rectangle at, Action click) => s.hits.Add(new BottomScreen.Hit { Rect = at, Click = click });
