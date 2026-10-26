@@ -12,6 +12,7 @@
 #include <3ds.h>
 
 #include <dirent.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,18 +317,47 @@ static void drawTop(const u16 *src, u32 w, u32 h)
     presentTop();
 }
 
-// The input display: a small picture of the controls in the top screen's
-// bottom left corner, over the clip (darkened under it), with what was held
-// during the frame on screen in the logo's red. For clips recorded with their
-// inputs (see flb.h); Settings turns it on and off.
-#define PAD_W       128
-#define PAD_H       62
+// The input display: a picture of the controls in the top screen's bottom
+// left corner, drawn over the clip. Each control is a light line between two
+// black edges, smoothed into the picture, and filled in while it was held
+// during the frame on screen; the Circle Pad shows where its knob was, and the
+// touch screen (darkened inside) where it was touched. For clips recorded with
+// their inputs (see flb.h); Settings turns it on and off.
+// It's laid out at 136 x 84 (the coordinates below), mirrored about the touch
+// screen's middle, and drawn at PAD_SCALE of that.
+#define PAD_SCALE   0.8f
+#define PAD_W       109     // (the layout's 136 x 84, at PAD_SCALE)
+#define PAD_H       68
 #define PAD_X       6       // where it is on the top screen
 #define PAD_Y       (TOP_H - PAD_H - 6)
-#define COLOR_PAD_IDLE  ((u16)(RGB8_to_565(85, 85, 85)))
-#define COLOR_PAD_LINE  ((u16)(RGB8_to_565(150, 150, 150)))
-#define COLOR_PAD_ON    COLOR_PLAYED
+#define PAD_LIGHT_R 28      // the light line's colour, in RGB565 (225, 225, 225)
+#define PAD_LIGHT_G 56
+#define PAD_LIGHT_B 28
 
+// The Circle Pad's middle, and how far its knob can go from it.
+#define PAD_STICK_X     25
+#define PAD_STICK_Y     29
+#define PAD_STICK_REACH 5
+// Where a touch can be shown, inside the touch screen.
+#define PAD_TOUCH_X0    57
+#define PAD_TOUCH_Y0    30
+#define PAD_TOUCH_W     26
+#define PAD_TOUCH_H     16
+
+// The pixels the controls cover (worked out once, from their shapes), and how
+// they cover the clip while their button isn't held [0] and is [1].
+typedef struct PadPixel {
+    u8 x, y;            // in the display
+    u8 key;             // index into kPadKeys, or PAD_NO_KEY
+    bool darken;        // inside the touch screen: the clip is darkened under it
+    u8 alpha[2];        // how much of the clip it covers, out of 32...
+    u16 color[2];       // ...and with what
+} PadPixel;
+#define PAD_NO_KEY  0xFF
+static const u32 kPadKeys[] = { KEY_L, KEY_R, KEY_DUP, KEY_DDOWN, KEY_DLEFT, KEY_DRIGHT,
+                                KEY_X, KEY_Y, KEY_A, KEY_B, KEY_SELECT, KEY_START };
+static PadPixel g_padPixels[PAD_W * PAD_H];
+static u32 g_padPixelCount;             // (0 until they're worked out)
 static u16 g_padUnder[PAD_W * PAD_H];   // the clip's pixels under it (to draw it again over the same frame)
 
 static inline u16 *padAt(u16 *fb, int x, int y)
@@ -335,22 +365,121 @@ static inline u16 *padAt(u16 *fb, int x, int y)
     return fb + (PAD_X + x) * TOP_H + (TOP_H - 1 - (PAD_Y + y));
 }
 
-static void padRect(u16 *fb, int x0, int y0, int x1, int y1, u16 color)
+// How far (in pixels, negative inside) point (x, y) is from the edge of a
+// rounded rectangle centred on (cx, cy), hw and hh from its middle to its
+// sides, with corners of radius r; or from the edge of a circle.
+static float padRoundRect(float x, float y, float cx, float cy, float hw, float hh, float r)
 {
-    for (int x = x0; x < x1; x++)
-        for (int y = y0; y < y1; y++)
-            *padAt(fb, x, y) = color;
+    float qx = fabsf(x - cx) - (hw - r), qy = fabsf(y - cy) - (hh - r);
+    float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f;
+    float in = qx > qy ? qx : qy;
+    return sqrtf(ox * ox + oy * oy) + (in < 0.0f ? in : 0.0f) - r;
 }
 
-// A disc of radius r (with 'ring', just its edge).
-static void padCircle(u16 *fb, int cx, int cy, int r, bool ring, u16 color)
+static float padCircleEdge(float x, float y, float cx, float cy, float r)
 {
-    for (int dx = -r; dx <= r; dx++)
-        for (int dy = -r; dy <= r; dy++)
+    return sqrtf((x - cx) * (x - cx) + (y - cy) * (y - cy)) - r;
+}
+
+static float padClamp(float v)
+{
+    return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+}
+
+// The light line's colour at 'level' (0: black, 1: full).
+static u16 padGrey(float level)
+{
+    u32 r = (u32)(PAD_LIGHT_R * level + 0.5f), g = (u32)(PAD_LIGHT_G * level + 0.5f), b = (u32)(PAD_LIGHT_B * level + 0.5f);
+    return (u16)(r << 11 | g << 5 | b);
+}
+
+// 'over' on 'under', 'alpha' (out of 32) of the way.
+static inline u16 padBlend(u16 under, u16 over, u32 alpha)
+{
+    u32 r = ((over >> 11) * alpha + (under >> 11) * (32 - alpha)) >> 5;
+    u32 g = (((over >> 5) & 63) * alpha + ((under >> 5) & 63) * (32 - alpha)) >> 5;
+    u32 b = ((over & 31) * alpha + (under & 31) * (32 - alpha)) >> 5;
+    return (u16)(r << 11 | g << 5 | b);
+}
+
+// How a control covers a pixel 'd' pixels from its edge (negative inside): a
+// black edge PAD_SCALE pixels wide, then the light line, twice as wide, then
+// another black edge, and inside that the clip, or the light line's colour
+// while it's held. Each change is smoothed over a pixel.
+static void padOutline(float d, bool held, u8 *alpha, u16 *color)
+{
+    const float e = PAD_SCALE;
+    float a = padClamp(e + 0.5f - d);
+    float level = fminf(padClamp(0.5f - d), padClamp(d + 2.0f * e + 0.5f));
+    if (held)
+        level = fmaxf(level, padClamp(-3.0f * e + 0.5f - d));
+    else
+        a = fminf(a, padClamp(d + 3.0f * e + 0.5f));
+    *alpha = (u8)(a * 32.0f + 0.5f);
+    *color = padGrey(level);
+}
+
+static void padBuildPixels(void)
+{
+    g_padPixelCount = 0;
+    for (int y = 0; y < PAD_H; y++)
+        for (int x = 0; x < PAD_W; x++)
         {
-            int d = dx * dx + dy * dy;
-            if (d <= r * r + r && (!ring || d > (r - 1) * (r - 1) + r - 1))
-                *padAt(fb, cx + dx, cy + dy) = color;
+            float px = (x + 0.5f) / PAD_SCALE, py = (y + 0.5f) / PAD_SCALE;    // (in the layout)
+            float dx = px - 25, dy = py - 64;   // (from the D-Pad's middle)
+            struct { float d; u8 key; bool darken; } controls[] = {
+                { padRoundRect(px, py, 30, 9, 24, 5, 5), 0, false },                         // L
+                { padRoundRect(px, py, 110, 9, 24, 5, 5), 1, false },                        // R
+                { padCircleEdge(px, py, PAD_STICK_X, PAD_STICK_Y, 12), PAD_NO_KEY, false },  // the Circle Pad
+                // The D-Pad: one cross, its inside shared out between its arms.
+                { fminf(padRoundRect(px, py, 25, 64, 19, 7, 2), padRoundRect(px, py, 25, 64, 7, 19, 2)),
+                  fabsf(dx) < 3.0f && fabsf(dy) < 3.0f ? PAD_NO_KEY :
+                  fabsf(dy) > fabsf(dx) ? (dy < 0.0f ? 2 : 3) : (dx < 0.0f ? 4 : 5), false },
+                { padRoundRect(px, py, 70, 38, 19, 14, 3), PAD_NO_KEY, true },               // the touch screen
+                { padRoundRect(px, py, 60, 66, 8, 5, 5), 10, false },                        // SELECT
+                { padRoundRect(px, py, 80, 66, 8, 5, 5), 11, false },                        // START
+                { padCircleEdge(px, py, 115, 38, 7), 6, false },                             // X
+                { padCircleEdge(px, py, 103, 50, 7), 7, false },                             // Y
+                { padCircleEdge(px, py, 127, 50, 7), 8, false },                             // A
+                { padCircleEdge(px, py, 115, 62, 7), 9, false },                             // B
+            };
+
+            // The control nearest the pixel (they don't touch), and how far it is
+            // from its edge in pixels.
+            u32 n = 0;
+            for (u32 i = 1; i < sizeof(controls) / sizeof(controls[0]); i++)
+                if (controls[i].d < controls[n].d)
+                    n = i;
+            float d = controls[n].d * PAD_SCALE;
+            PadPixel *p = &g_padPixels[g_padPixelCount];
+            p->x = (u8)x;
+            p->y = (u8)y;
+            p->key = controls[n].key;
+            p->darken = controls[n].darken && d <= -2.0f * PAD_SCALE;     // (under its inner black edge)
+            padOutline(d, false, &p->alpha[0], &p->color[0]);
+            padOutline(d, p->key != PAD_NO_KEY, &p->alpha[1], &p->color[1]);
+            if (p->alpha[0] != 0 || p->alpha[1] != 0 || p->darken)
+                g_padPixelCount++;
+        }
+}
+
+// A dot centred on (cx, cy), r in radius, in the layout (the Circle Pad's knob,
+// or a touch): light, with a black edge, smoothed.
+static void padDot(u16 *fb, float cx, float cy, float r)
+{
+    cx *= PAD_SCALE;
+    cy *= PAD_SCALE;
+    r *= PAD_SCALE;
+    for (int x = (int)(cx - r) - 2; x <= (int)(cx + r) + 2; x++)
+        for (int y = (int)(cy - r) - 2; y <= (int)(cy + r) + 2; y++)
+        {
+            float d = sqrtf((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy)) - r;
+            u32 alpha = (u32)(padClamp(PAD_SCALE + 0.5f - d) * 32.0f + 0.5f);
+            if (alpha != 0)
+            {
+                u16 *c = padAt(fb, x, y);
+                *c = padBlend(*c, padGrey(padClamp(0.5f - d)), alpha);
+            }
         }
 }
 
@@ -370,53 +499,35 @@ static void padRestoreUnder(u16 *fb)
 
 static void drawInputs(u16 *fb, const FlbInput *in)
 {
-    // The clip under it at half brightness (each channel halved).
-    for (int x = 0; x < PAD_W; x++)
-    {
-        u16 *c = padAt(fb, x, PAD_H - 1);
-        for (int i = 0; i < PAD_H; i++)
-            c[i] = (c[i] >> 1) & 0x7BEF;
-    }
+    if (g_padPixelCount == 0)
+        padBuildPixels();
 
     u32 b = in->buttons;
-#define PAD_KEY(keys) ((b & (keys)) ? COLOR_PAD_ON : COLOR_PAD_IDLE)
-    padRect(fb, 4, 2, 34, 7, PAD_KEY(KEY_L));
-    padRect(fb, 94, 2, 124, 7, PAD_KEY(KEY_R));
-
-    // The Circle Pad: its range, and where it was (red once HID counts it as a direction).
-    int kx = in->circleX * 8 / 156, ky = in->circleY * 8 / 156;
-    kx = kx < -8 ? -8 : kx > 8 ? 8 : kx;
-    ky = ky < -8 ? -8 : ky > 8 ? 8 : ky;
-    padCircle(fb, 20, 23, 11, true, COLOR_PAD_LINE);
-    padCircle(fb, 20 + kx, 23 - ky, 3, false,
-              (b & (KEY_CPAD_UP | KEY_CPAD_DOWN | KEY_CPAD_LEFT | KEY_CPAD_RIGHT)) ? COLOR_PAD_ON : COLOR_PAD_LINE);
-
-    // The D-Pad.
-    padRect(fb, 17, 38, 24, 45, PAD_KEY(KEY_DUP));
-    padRect(fb, 17, 51, 24, 58, PAD_KEY(KEY_DDOWN));
-    padRect(fb, 10, 45, 17, 51, PAD_KEY(KEY_DLEFT));
-    padRect(fb, 24, 45, 31, 51, PAD_KEY(KEY_DRIGHT));
-    padRect(fb, 17, 45, 24, 51, COLOR_PAD_IDLE);
-
-    // The touch screen (320 x 240, at a tenth), and where it was touched.
-    padRect(fb, 47, 15, 81, 16, COLOR_PAD_LINE);
-    padRect(fb, 47, 40, 81, 41, COLOR_PAD_LINE);
-    padRect(fb, 47, 15, 48, 41, COLOR_PAD_LINE);
-    padRect(fb, 80, 15, 81, 41, COLOR_PAD_LINE);
-    if (b & KEY_TOUCH)
+    for (u32 i = 0; i < g_padPixelCount; i++)
     {
-        int tx = 48 + in->touchX * 32 / 320, ty = 16 + in->touchY * 24 / 240;
-        padCircle(fb, tx < 50 ? 50 : tx > 78 ? 78 : tx, ty < 18 ? 18 : ty > 38 ? 38 : ty, 2, false, COLOR_PAD_ON);
+        const PadPixel *p = &g_padPixels[i];
+        u32 held = p->key != PAD_NO_KEY && (b & kPadKeys[p->key]) ? 1 : 0;
+        u16 *c = padAt(fb, p->x, p->y);
+        u16 under = p->darken ? (u16)((*c >> 1) & 0x7BEF) : *c;    // (darkened: each channel halved)
+        *c = padBlend(under, p->color[held], p->alpha[held]);
     }
 
-    padRect(fb, 48, 48, 62, 52, PAD_KEY(KEY_SELECT));
-    padRect(fb, 66, 48, 80, 52, PAD_KEY(KEY_START));
+    // The Circle Pad's knob, where it was (as far as it reaches)...
+    float kx = in->circleX * (float)PAD_STICK_REACH / 156.0f, ky = in->circleY * (float)PAD_STICK_REACH / 156.0f;
+    float k = sqrtf(kx * kx + ky * ky);
+    if (k > PAD_STICK_REACH)
+    {
+        kx *= PAD_STICK_REACH / k;
+        ky *= PAD_STICK_REACH / k;
+    }
+    padDot(fb, PAD_STICK_X + kx, PAD_STICK_Y - ky, 3.0f);
 
-    padCircle(fb, 108, 23, 5, false, PAD_KEY(KEY_X));
-    padCircle(fb, 97, 34, 5, false, PAD_KEY(KEY_Y));
-    padCircle(fb, 119, 34, 5, false, PAD_KEY(KEY_A));
-    padCircle(fb, 108, 45, 5, false, PAD_KEY(KEY_B));
-#undef PAD_KEY
+    // ...and where the touch screen was touched (320 x 240).
+    if (b & KEY_TOUCH)
+    {
+        u32 tx = in->touchX < 320 ? in->touchX : 319, ty = in->touchY < 240 ? in->touchY : 239;
+        padDot(fb, PAD_TOUCH_X0 + tx * (float)PAD_TOUCH_W / 320.0f, PAD_TOUCH_Y0 + ty * (float)PAD_TOUCH_H / 240.0f, 2.0f);
+    }
 }
 
 // ---------------------------------------------------------------------------
