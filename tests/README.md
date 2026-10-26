@@ -3,7 +3,7 @@
 These test the app's own code on a PC: the clip reader and compactor
 (`3ds-app/source/flb.c`), and the player's read-ahead thread (the "Reading
 ahead" section of `3ds-app/source/main.c`). They also test the converter's code
-(`converter/`). Run them after changing any of those:
+(`windows-app/`). Run them after changing any of those:
 
 ```
 python run_tests.py --cc "C:/Program Files/JetBrains/CLion 2025.2.4/bin/mingw/bin/gcc.exe"
@@ -63,7 +63,7 @@ test won't build until it has one.
 ## Converter test
 
 `converter_test/ConverterTest.cs` is built with the converter's own clip reader,
-input display and conversion code (`converter/FlbClip.cs`, `InputOverlay.cs`
+input display and conversion code (`windows-app/FlbClip.cs`, `InputOverlay.cs`
 and `Converter.cs`), and runs in `build/converter/`.
 
 It writes clips of every version: as the recorder saves them, with the ring of

@@ -57,7 +57,7 @@ The Status column says why a clip can't be converted, or why converting it faile
 
 ### Building it
 
-The converter is in [`converter/`](converter): a small Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build converter -c Release` builds `converter/bin/Release/net48/FlashbackConverter.exe`. To convert with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
+The converter is in [`windows-app/`](windows-app): a small Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build windows-app -c Release` builds `windows-app/bin/Release/net48/FlashbackConverter.exe`. To convert with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
 
 ## Watching clips on the 3DS
 

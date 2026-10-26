@@ -1,5 +1,5 @@
 """Runs Flashback Studio's PC tests (see README.md) against 3ds-app/source and
-converter, and says which passed. Exits with 1 if any failed.
+windows-app, and says which passed. Exits with 1 if any failed.
 
 usage: python run_tests.py [--cc COMPILER]
   --cc  a C compiler for this PC (default: gcc); on Windows, a MinGW gcc

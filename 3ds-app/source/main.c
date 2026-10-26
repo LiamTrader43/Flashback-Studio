@@ -326,7 +326,7 @@ static void drawTop(const u16 *src, u32 w, u32 h)
 // It's laid out at 136 x 84 (the coordinates below), mirrored about the touch
 // screen's middle, and drawn at PAD_SCALE of that.
 // Flashback Converter draws the same display into videos
-// (converter/InputOverlay.cs): keep the two alike (tests/ checks they are).
+// (windows-app/InputOverlay.cs): keep the two alike (tests/ checks they are).
 #define PAD_SCALE   0.8f
 #define PAD_W       109     // (the layout's 136 x 84, at PAD_SCALE)
 #define PAD_H       68

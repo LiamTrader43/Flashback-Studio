@@ -13,9 +13,9 @@
 
   <ItemGroup>
     <Compile Include="ConverterTest.cs" />
-    <Compile Include="..\..\converter\FlbClip.cs" />
-    <Compile Include="..\..\converter\InputOverlay.cs" />
-    <Compile Include="..\..\converter\Converter.cs" />
+    <Compile Include="..\..\windows-app\FlbClip.cs" />
+    <Compile Include="..\..\windows-app\InputOverlay.cs" />
+    <Compile Include="..\..\windows-app\Converter.cs" />
   </ItemGroup>
 
 </Project>

@@ -11,10 +11,17 @@
     <AssemblyName>FlashbackConverter</AssemblyName>
     <RootNamespace>FlashbackConverter</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Flashback Studio's icon (3ds-app/assets/icon-1024.png), at Windows' sizes -->
+    <ApplicationIcon>icon.ico</ApplicationIcon>
     <Product>Flashback Converter</Product>
     <Description>Turns Flashback clips (.flb) into MP4 videos</Description>
     <DebugType>none</DebugType>
     <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- (the window's icon too, with all its sizes) -->
+    <EmbeddedResource Include="icon.ico" LogicalName="icon.ico" />
+  </ItemGroup>
 
 </Project>

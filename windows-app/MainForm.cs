@@ -48,6 +48,8 @@ namespace FlashbackConverter
         public MainForm(string[] paths)
         {
             Text = "Flashback Converter";
+            using (Stream icon = typeof(MainForm).Assembly.GetManifestResourceStream("icon.ico"))
+                Icon = new Icon(icon);
             Font = SystemFonts.MessageBoxFont;
             AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(S(820), S(440));

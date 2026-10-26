@@ -1,4 +1,4 @@
-// PC test of Flashback Converter (converter/), with the converter's own code:
+// PC test of Flashback Converter (windows-app/), with the converter's own code:
 //  - its clip reader, on clips of every version: as the recorder saves them
 //    (the ring of frames and the sound wrapping around) and as Flashback Studio
 //    compacts them, with and without sound and inputs, with copies of missed
