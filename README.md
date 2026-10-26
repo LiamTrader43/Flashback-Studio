@@ -53,8 +53,8 @@ It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-th
 | Playing a clip | |
 |---|---|
 | Space (or click the picture) | Play/pause |
-| Left/Right | Previous/next frame (pauses) |
-| Page Up/Page Down (or Shift+Left/Right) | Back/forward 1 second |
+| , / . | Previous/next frame (pauses; hold to repeat) |
+| Left/Right | Back/forward 1 second |
 | Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
 | + / - (or drag the volume slider) | Volume, while trimming too. It's only the player's: exported MP4s have the sound as recorded. It's remembered for next time. |
 | S | Settings: Loop, Input display, Timing details |
@@ -67,8 +67,8 @@ It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-th
 |---|---|
 | I / O | Start / end the selection at this frame |
 | Space | Play/pause the selection |
-| Left/Right | Previous/next frame |
-| Up/Down | Forward/back 1 second |
+| , / . | Previous/next frame |
+| Left/Right | Back/forward 1 second |
 | Enter | Save the selection as a new clip (asks first) |
 | E | Export the selection as an MP4 |
 | L | Loop on/off |

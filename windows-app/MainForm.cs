@@ -1277,22 +1277,16 @@ namespace FlashbackStudio
             switch (key)
             {
                 case Keys.Space: pl.PlayPause(); break;
-                case Keys.Left: pl.Step(-1); break;
-                case Keys.Right: pl.Step(1); break;
-                case Keys.Left | Keys.Shift:
-                case Keys.PageUp: pl.Jump(-1); break;
-                case Keys.Right | Keys.Shift:
-                case Keys.PageDown: pl.Jump(1); break;
+                case Keys.Oemcomma: pl.Step(-1); break;     // (",": a frame back, "." a frame on, like video editors)
+                case Keys.OemPeriod: pl.Step(1); break;
+                case Keys.Left: pl.Jump(-1); break;
+                case Keys.Right: pl.Jump(1); break;
                 case Keys.Up:
-                    if (pl.TrimMode)
-                        pl.Jump(1);
-                    else
+                    if (!pl.TrimMode)
                         pl.ChangeSpeed(1);
                     break;
                 case Keys.Down:
-                    if (pl.TrimMode)
-                        pl.Jump(-1);
-                    else
+                    if (!pl.TrimMode)
                         pl.ChangeSpeed(-1);
                     break;
                 case Keys.T:
@@ -1542,8 +1536,8 @@ namespace FlashbackStudio
             else if (pl.TrimMode)
             {
                 Help(p, r++, "Space", "Play / pause the selection", pl.PlayPause);
-                Help(p, r++, "Left/Right", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
-                Help(p, r++, "Up/Down", "Forward / back 1 second", () => pl.Jump(1), () => pl.Jump(-1));
+                Help(p, r++, ",/.", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
+                Help(p, r++, "Left/Right", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
                 Help(p, r++, "I/O", "Start / end the selection here", pl.SetTrimIn, pl.SetTrimOut);
                 Help(p, r++, "Enter", "Save it as a new clip", AskSave);
                 Help(p, r++, "E", "Export it as an MP4", ExportFromPlayer);
@@ -1555,8 +1549,8 @@ namespace FlashbackStudio
             else
             {
                 Help(p, r++, "Space", "Play / pause", pl.PlayPause);
-                Help(p, r++, "Left/Right", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
-                Help(p, r++, "PgUp/PgDn", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
+                Help(p, r++, ",/.", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
+                Help(p, r++, "Left/Right", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
                 Help(p, r++, "Up/Down", "Speed", () => pl.ChangeSpeed(1), () => pl.ChangeSpeed(-1));
                 Help(p, r++, "+/-", "Volume up / down", () => SetVolume(volume + 10), () => SetVolume(volume - 10));
                 Help(p, r++, "S", "Settings (loop, inputs, ...)", () => pl.SettingsOpen = true);
