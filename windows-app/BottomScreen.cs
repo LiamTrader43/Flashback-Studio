@@ -322,45 +322,42 @@ namespace FlashbackStudio
             Clickable(box, click);
         }
 
-        // A picture for a player button: play, pause, a frame back or on, a
-        // second back or on (the usual media player ones).
+        // A picture for a player button: play, pause, and a triangle pointing
+        // back or on, small for a frame and big for a second.
         void DrawGlyph(Glyph glyph, Rectangle box, Color color)
         {
             float h = Math.Min(box.Height, box.Width) * 0.42f, cx = box.X + box.Width / 2f, cy = box.Y + box.Height / 2f;
-            float w = h * 0.86f, bar = Math.Max(2f, h * 0.18f);
+            float bar = Math.Max(2f, h * 0.18f);
             G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             using (Brush b = new SolidBrush(color))
             {
-                // A triangle pointing right (or left), its flat side at x.
-                void Triangle(float x, bool right)
+                // A triangle 'size' times play's, pointing right (or left), in the middle.
+                void Triangle(float size, bool right)
                 {
-                    float point = right ? x + w : x - w;
-                    G.FillPolygon(b, new[] { new PointF(x, cy - h / 2), new PointF(x, cy + h / 2), new PointF(point, cy) });
+                    float th = h * size, tw = th * 0.86f;
+                    float flat = right ? cx - tw * 0.4f : cx + tw * 0.4f, point = right ? flat + tw : flat - tw;
+                    G.FillPolygon(b, new[] { new PointF(flat, cy - th / 2), new PointF(flat, cy + th / 2), new PointF(point, cy) });
                 }
                 switch (glyph)
                 {
                     case Glyph.Play:
-                        Triangle(cx - w * 0.4f, true);
+                        Triangle(1, true);
                         break;
                     case Glyph.Pause:
                         G.FillRectangle(b, cx - bar * 1.6f, cy - h / 2, bar * 1.1f, h);
                         G.FillRectangle(b, cx + bar * 0.5f, cy - h / 2, bar * 1.1f, h);
                         break;
                     case Glyph.FrameOn:
-                        Triangle(cx - (w + bar * 1.5f) / 2, true);
-                        G.FillRectangle(b, cx + (w + bar * 1.5f) / 2 - bar, cy - h / 2, bar, h);
+                        Triangle(0.65f, true);
                         break;
                     case Glyph.FrameBack:
-                        G.FillRectangle(b, cx - (w + bar * 1.5f) / 2, cy - h / 2, bar, h);
-                        Triangle(cx + (w + bar * 1.5f) / 2, false);
+                        Triangle(0.65f, false);
                         break;
                     case Glyph.SecondOn:
-                        Triangle(cx - w, true);
-                        Triangle(cx, true);
+                        Triangle(1.3f, true);
                         break;
                     case Glyph.SecondBack:
-                        Triangle(cx, false);
-                        Triangle(cx + w, false);
+                        Triangle(1.3f, false);
                         break;
                 }
             }
