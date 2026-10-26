@@ -51,7 +51,7 @@ Under them, the speed (1/4x, 1/2x, 1x, 2x), and buttons for the **Settings** (Lo
 
 While trimming, the same keys work, and the buttons set the **Start here** and **End here** of the selection, **Save as a new clip** (asks first), turn the **Loop** on and off, **Export the selection** as an MP4, or **Stop trimming**.
 
-Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting, trimming, renaming and deleting do exactly what they do on the 3DS, and write exactly the same clips, so clips can go back and forth between the two. **Cancel** stops compacting or trimming at any time, and leaves the clip as it was.
+Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting and trimming do exactly what they do on the 3DS, and write exactly the same clips, and renaming follows the same rules, so clips can go back and forth between the two. **Cancel** stops compacting or trimming at any time, and leaves the clip as it was.
 
 ### Exporting MP4s
 
@@ -72,7 +72,7 @@ The bottom screen says what went wrong, under the selected clip's details.
 
 | Message | What to do |
 |---|---|
-| `Exporting needs ffmpeg.exe next to FlashbackStudio.exe` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackStudio.exe`. Opening the app from inside the zip, without extracting it, doesn't work. |
+| `Exporting needs ffmpeg.exe next to FlashbackStudio.exe` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackStudio.exe`. Opening the app straight from the zip, without extracting it, leaves ffmpeg behind. |
 | Windows says "Windows protected your PC" | The app isn't signed, so Windows doesn't know it. Click **More info**, then **Run anyway**. |
 | `Not a Flashback clip (or the copy is incomplete)`, `Not a Flashback clip (file too small)` or `The file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
 | `Made by a newer Flashback version` | Download Flashback Studio from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |

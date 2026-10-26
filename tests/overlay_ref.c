@@ -1,5 +1,5 @@
-/* Flashback Studio's input display, as the 3DS app draws it, for the converter
-   test to compare the converter's with: run_tests.py copies main.c's drawing
+/* Flashback Studio's input display, as the 3DS app draws it, for the Windows
+   app test to compare the Windows app's with: run_tests.py copies main.c's drawing
    code (from "// The input display:" to the end of drawInputs), unchanged, into
    build/overlay_extracted.c, which this includes.
 
