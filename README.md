@@ -140,7 +140,7 @@ X opens the player's settings on the bottom screen, while the clip carries on pl
 | Input display | Show what was pressed (see below) |
 | Timing details | How long each frame takes to read and draw, and how close the sound is to the picture |
 
-**Input display.** Clips recorded since Flashback records the inputs show them in the top screen's bottom-left corner, over the picture. It shows the buttons held during each frame in red (a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Clips recorded before then have no inputs to show.
+**Input display.** Clips recorded since Flashback records the inputs show them in the top screen's bottom-left corner, over the picture. It shows the buttons held during each frame filled in (a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Clips recorded before then have no inputs to show.
 
 Red marks under the progress bar show where the recorder missed frames (they're filled with copies of the frame before, so the clip plays at the right speed). On a missed frame, the player says so.
 
