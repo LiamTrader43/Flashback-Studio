@@ -395,12 +395,12 @@ namespace FlashbackStudio
 
         static string Sentence(string s) => s.Length > 0 ? char.ToUpperInvariant(s[0]) + s.Substring(1) : s;
 
-        // Keys to press (or click), side by side: "key what" each.
-        static void Hints(Painter p, int r, params (string Text, Action Click)[] hints)
+        // A row of buttons: each what it does, and its action.
+        static void Buttons(Painter p, int r, params (string Label, Action Click)[] buttons)
         {
             int col = 1;
-            foreach ((string text, Action click) in hints)
-                col = p.Button(r, col, text, click) + 2;
+            foreach ((string label, Action click) in buttons)
+                col = p.Button(r, col, label, click) + 1;
         }
 
         void PaintList(Painter p)
@@ -442,20 +442,20 @@ namespace FlashbackStudio
                     p.Text(d + 1, 1, Style.Normal, jobName ?? "");
                     PaintProgress(p, d + 2, jobDone);
                     p.Text(d + 3, 1, Style.Normal, jobDetail ?? "");
-                    Hints(p, hints, ("Esc Cancel", CancelJob));
+                    Buttons(p, hints, ("Cancel", CancelJob));
                     return;
                 case Mode.ConfirmDelete:
                     p.Text(d, 1, Style.Warn, "Delete this clip?");
                     p.Text(d + 1, 1, Style.Normal, c.Name);
                     p.Text(d + 2, 1, Style.Normal, IsRemovable(c.Path) ? "It can't be undone (it's on a removable drive)." : "It goes to the Recycle Bin.");
-                    Hints(p, hints, ("Enter Delete", Delete), ("Esc Cancel", Cancel));
+                    Buttons(p, hints, ("Delete", Delete), ("Cancel", Cancel));
                     return;
                 case Mode.ConfirmCompact:
                     p.Text(d, 1, Style.Info, "Compact this clip?");
                     p.Text(d + 1, 1, Style.Normal, c.Name);
                     p.Text(d + 2, 1, Style.Normal, $"{Names.Size(c.FileSize)} -> {Names.Size(c.CompactSize)}");
                     p.Wrap(d + 3, d + 5, Style.Normal, "Remove empty space between frames. The same video but smaller.", 1);
-                    Hints(p, hints, ("Enter Compact", Compact), ("Esc Cancel", Cancel));
+                    Buttons(p, hints, ("Compact", Compact), ("Cancel", Cancel));
                     return;
                 case Mode.ConfirmExport:
                 {
@@ -466,7 +466,7 @@ namespace FlashbackStudio
                     PaintInputsChoice(p, d + 3, c.HasInputs);
                     if (!part && File.Exists(ExportMp4()))
                         p.Text(d + 4, 1, Style.Warn, "Its MP4 already exists: it will be replaced.");
-                    Hints(p, hints, ("Enter Export", Export), ("I Input display", ToggleExportInputs), ("Esc Cancel", Cancel));
+                    Buttons(p, hints, ("Export", Export), ("Cancel", Cancel));
                     return;
                 }
                 case Mode.ConfirmExportAll:
@@ -479,10 +479,9 @@ namespace FlashbackStudio
                     {
                         string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4: ";
                         p.Text(d + 3, 1, Style.Normal, text);
-                        p.Button(d + 3, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, Style.Info);
+                        p.Button(d + 3, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace);
                     }
-                    Hints(p, hints, ("Enter Export", Export), ("I Input display", ToggleExportInputs), ("R Replace", ToggleExportReplace));
-                    Hints(p, hints + 1, ("Esc Cancel", Cancel));
+                    Buttons(p, hints, ("Export", Export), ("Cancel", Cancel));
                     return;
                 }
                 case Mode.Rename:
@@ -492,7 +491,7 @@ namespace FlashbackStudio
                         p.Wrap(d + 2, d + 4, Style.Warn, renameError, 1);
                     else
                         p.Text(d + 2, 1, Style.Dim, "Spaces become dashes.");
-                    Hints(p, hints, ("Enter Rename", Rename), ("Esc Cancel", Cancel));
+                    Buttons(p, hints, ("Rename", Rename), ("Cancel", Cancel));
                     return;
             }
 
@@ -521,19 +520,19 @@ namespace FlashbackStudio
 
             if (clips.Count > 0)
             {
-                Hints(p, hints, ("Enter Play", Play), ("T Trim", Trim), ("E Export", AskExport), ("C Compact", AskCompact));
-                Hints(p, hints + 1, ("F2 Rename", StartRename), ("Del Delete", AskDelete), ("F5 Refresh", Refresh));
-                Hints(p, hints + 2, ("Shift+E Export all", AskExportAll), ("O Open folder", ChooseFolder));
+                Buttons(p, hints, ("Play", Play), ("Trim", Trim), ("Export", AskExport), ("Compact", AskCompact));
+                Buttons(p, hints + 1, ("Rename", StartRename), ("Delete", AskDelete), ("Refresh", RefreshList));
+                Buttons(p, hints + 2, ("Export all", AskExportAll), ("Open folder", ChooseFolder));
             }
             else
-                Hints(p, hints + 2, ("O Open folder", ChooseFolder), ("F5 Refresh", Refresh));
+                Buttons(p, hints + 2, ("Open folder", ChooseFolder), ("Refresh", RefreshList));
         }
 
         void PaintInputsChoice(Painter p, int r, bool any)
         {
             const string label = "Input display: ";
             p.Text(r, 1, Style.Normal, label);
-            int col = p.Button(r, 1 + label.Length, exportInputs ? "on" : "off", ToggleExportInputs, Style.Info);
+            int col = p.Button(r, 1 + label.Length, exportInputs ? "on" : "off", ToggleExportInputs);
             if (!any)
                 p.Text(r, col + 1, Style.Dim, "(no inputs in this clip)");
         }
@@ -597,78 +596,34 @@ namespace FlashbackStudio
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        // Does what 'key' does now; false if it does nothing (so a name being
-        // typed gets it).
+        // Does what 'key' does now; false if it does nothing. Everything has a
+        // button; only playing (Space), a frame back and on (, and .) and a
+        // second back and on (Left/Right) have keys too, while a clip is open.
+        // (And a name being typed is renamed to with Enter, as in any text box.)
         bool HandleKey(Keys key)
         {
-            switch (mode)
+            if (mode == Mode.Rename)
             {
-                case Mode.Rename:
-                    if (key == Keys.Enter)
-                        Rename();
-                    else if (key == Keys.Escape)
-                        Cancel();
-                    else
-                        return false;
-                    return true;
-                case Mode.Job:
-                    if (key == Keys.Escape)
-                        CancelJob();
-                    return true;
-                case Mode.ConfirmDelete:
-                case Mode.ConfirmCompact:
-                case Mode.ConfirmExport:
-                case Mode.ConfirmExportAll:
-                    if (key == Keys.Enter)
-                    {
-                        if (mode == Mode.ConfirmDelete)
-                            Delete();
-                        else if (mode == Mode.ConfirmCompact)
-                            Compact();
-                        else
-                            Export();
-                    }
-                    else if (key == Keys.Escape)
-                        Cancel();
-                    else if (key == Keys.I && (mode == Mode.ConfirmExport || mode == Mode.ConfirmExportAll))
-                        ToggleExportInputs();
-                    else if (key == Keys.R && mode == Mode.ConfirmExportAll)
-                        ToggleExportReplace();
-                    return true;
-                case Mode.Player:
-                    return PlayerKey(key);
+                if (key == Keys.Enter)
+                    Rename();
+                else if (key == Keys.Escape)
+                    Cancel();
+                else
+                    return false;
+                return true;
             }
-
-            // The clip list. Left/Right move along the grid, Up/Down a row (Down
-            // from a row above a shorter last one goes to the last clip).
+            if (mode != Mode.Player || askSave)
+                return false;
             switch (key)
             {
-                case Keys.Left: Select(selected - 1); break;
-                case Keys.Right: Select(selected + 1); break;
-                case Keys.Up:
-                    if (selected >= GridCols)
-                        Select(selected - GridCols);
-                    break;
-                case Keys.Down:
-                    if (selected / GridCols < (clips.Count - 1) / GridCols)
-                        Select(selected + GridCols);
-                    break;
-                case Keys.PageUp: Select(selected - GridCols * GridRows); break;
-                case Keys.PageDown: Select(selected + GridCols * GridRows); break;
-                case Keys.Home: Select(0); break;
-                case Keys.End: Select(clips.Count - 1); break;
-                case Keys.Enter:
-                case Keys.Space: Play(); break;
-                case Keys.T: Trim(); break;
-                case Keys.E: AskExport(); break;
-                case Keys.E | Keys.Shift: AskExportAll(); break;
-                case Keys.C: AskCompact(); break;
-                case Keys.F2: StartRename(); break;
-                case Keys.Delete: AskDelete(); break;
-                case Keys.F5: RefreshList(); break;
-                case Keys.O: ChooseFolder(); break;
+                case Keys.Space: player.PlayPause(); break;
+                case Keys.Oemcomma: player.Step(-1); break;     // (",": a frame back, "." a frame on, like video editors)
+                case Keys.OemPeriod: player.Step(1); break;
+                case Keys.Left: player.Jump(-1); break;
+                case Keys.Right: player.Jump(1); break;
                 default: return false;
             }
+            PlayerChanged();
             return true;
         }
 
@@ -1243,105 +1198,6 @@ namespace FlashbackStudio
 
         void ToggleLoop() => player.Loop = !player.Loop;
 
-        bool PlayerKey(Keys key)
-        {
-            Player pl = player;
-            if (pl.SettingsOpen)
-            {
-                // The settings take the keys while they're open; the clip plays on.
-                if (key == Keys.Up)
-                    pl.SettingsItem = (pl.SettingsItem + SettingNames.Length - 1) % SettingNames.Length;
-                else if (key == Keys.Down)
-                    pl.SettingsItem = (pl.SettingsItem + 1) % SettingNames.Length;
-                else if (key == Keys.Enter || key == Keys.Space || key == Keys.Left || key == Keys.Right)
-                    ToggleSetting(pl.SettingsItem);
-                else if (key == Keys.S || key == Keys.Escape)
-                    pl.SettingsOpen = false;
-                else
-                    return true;
-                PlayerChanged();
-                return true;
-            }
-            if (askSave)
-            {
-                if (key == Keys.Enter)
-                    SaveSelection();
-                else if (key == Keys.Escape)
-                {
-                    askSave = false;
-                    bottom.Invalidate();
-                }
-                return true;
-            }
-
-            switch (key)
-            {
-                case Keys.Space: pl.PlayPause(); break;
-                case Keys.Oemcomma: pl.Step(-1); break;     // (",": a frame back, "." a frame on, like video editors)
-                case Keys.OemPeriod: pl.Step(1); break;
-                case Keys.Left: pl.Jump(-1); break;
-                case Keys.Right: pl.Jump(1); break;
-                case Keys.Up:
-                    if (!pl.TrimMode)
-                        pl.ChangeSpeed(1);
-                    break;
-                case Keys.Down:
-                    if (!pl.TrimMode)
-                        pl.ChangeSpeed(-1);
-                    break;
-                case Keys.T:
-                    if (!pl.Clip.IsRaw)
-                        pl.ToggleTrim();
-                    break;
-                case Keys.E:
-                    ExportFromPlayer();
-                    return true;
-                case Keys.Escape:
-                case Keys.Back:
-                    if (pl.TrimMode)
-                        pl.ToggleTrim();
-                    else
-                    {
-                        ClosePlayer();
-                        return true;
-                    }
-                    break;
-                case Keys.S:
-                    if (!pl.TrimMode)
-                        pl.SettingsOpen = true;
-                    break;
-                case Keys.I:
-                    if (pl.TrimMode)
-                        pl.SetTrimIn();
-                    break;
-                case Keys.O:
-                    if (pl.TrimMode)
-                        pl.SetTrimOut();
-                    break;
-                case Keys.L:
-                    if (pl.TrimMode)
-                        ToggleLoop();
-                    break;
-                case Keys.Enter:
-                    if (pl.TrimMode)
-                        AskSave();
-                    break;
-                case Keys.Oemplus:                  // (+ is Shift and = on most keyboards; either will do)
-                case Keys.Oemplus | Keys.Shift:
-                case Keys.Add:
-                    SetVolume(volume + 10);
-                    break;
-                case Keys.OemMinus:
-                case Keys.Subtract:
-                    SetVolume(volume - 10);
-                    break;
-                default:
-                    return false;
-            }
-            PlayerChanged();
-            return true;
-        }
-
         // Playback's volume (0 to 100): the player's sound only, as exports are
         // as recorded. Remembered for next time.
         void SetVolume(int percent, bool remember = true)
@@ -1412,38 +1268,24 @@ namespace FlashbackStudio
             });
         }
 
-        // A help row: keys (each one clickable, if it has an action of its own)
-        // and what they do (clickable too, if there's one action).
-        void Help(Painter p, int r, string keys, string what, params Action[] actions)
+        // A row of the player's buttons: each what it does, the key that does
+        // the same (or null), and its action (null: greyed out).
+        void PlayerButtons(Painter p, int r, params (string Label, string Key, Action Click)[] buttons)
         {
             int col = 1;
-            string[] parts = keys.Length > 0 ? keys.Split('/') : new string[0];
-            for (int i = 0; i < parts.Length; i++)
-            {
-                if (i > 0)
-                    p.Text(r, col++, Style.Normal, "/");
-                if (i < actions.Length && actions[i] != null)
-                    col = p.Button(r, col, parts[i], WithPlayer(actions[i]));
-                else
-                {
-                    p.Text(r, col, Style.Normal, parts[i]);
-                    col += parts[i].Length;
-                }
-            }
-            if (actions.Length == 1 && actions[0] != null)
-                p.Button(r, 13, what, WithPlayer(actions[0]));
-            else
-                p.Text(r, parts.Length > 0 ? 13 : 1, Style.Normal, what);
+            foreach ((string label, string key, Action click) in buttons)
+                col = p.Button(r, col, label, WithPlayer(click), key) + 1;
         }
 
-        Action WithPlayer(Action action) => () =>
+        // An action on the player, then both screens brought up to date.
+        Action WithPlayer(Action action) => action == null ? null : (Action)(() =>
         {
             if (player == null)
                 return;
             action();
             if (mode == Mode.Player)
                 PlayerChanged();
-        };
+        });
 
         void PaintPlayer(Painter p)
         {
@@ -1457,10 +1299,7 @@ namespace FlashbackStudio
 
             p.Text(6, 1, Style.Normal, $"{Names.Time(pl.Frame, clip.Fps)} / {Names.Time(pl.Count, clip.Fps)}".PadRight(22) +
                                        $"Frame {pl.Frame + 1}/{pl.Count}");
-            int col = p.Button(7, 1, pl.Playing ? "Playing" : "Paused", WithPlayer(pl.PlayPause)) + 2;
-            col = p.Button(7, Math.Max(col, 10), Player.SpeedNames[pl.Speed],
-                           WithPlayer(() => pl.ChangeSpeed(pl.Speed + 1 < Player.SpeedNames.Length ? 1 : -3))) + 2;
-            p.Button(7, Math.Max(col, 17), "Loop " + (pl.Loop ? "on" : "off"), WithPlayer(ToggleLoop));
+            p.Text(7, 1, Style.Normal, $"{(pl.Playing ? "Playing" : "Paused"),-8} {Player.SpeedNames[pl.Speed],-6} Loop {(pl.Loop ? "on" : "off")}");
 
             if (pl.ShownEntry >= 0 && pl.IsMissed(pl.Frame))
                 p.Text(8, 1, Style.Warn, "Missed frame (copy of the one before)");
@@ -1501,10 +1340,10 @@ namespace FlashbackStudio
                                           $"({Names.Time(pl.TrimOut + 1 - pl.TrimIn, clip.Fps)})");
                 if (askSave)
                 {
-                    const string ask = "Save it as a new clip?  ";
+                    const string ask = "Save it as a new clip? ";
                     p.Text(15, 1, Style.Key, ask);
-                    int c2 = p.Button(15, 1 + ask.Length, "Enter: save", SaveSelection, Style.Key) + 2;
-                    p.Button(15, c2, "Esc: no", () => { askSave = false; bottom.Invalidate(); }, Style.Key);
+                    int c2 = p.Button(15, 1 + ask.Length, "Save", SaveSelection) + 1;
+                    p.Button(15, c2, "No", () => { askSave = false; bottom.Invalidate(); });
                 }
                 else if (pl.TrimMessage != null)
                     p.Text(15, 1, Style.Warn, pl.TrimMessage);
@@ -1514,51 +1353,43 @@ namespace FlashbackStudio
             p.Text(sep, 0, Style.Dim, new string('-', BottomScreen.Cols));
             if (pl.SettingsOpen)
             {
-                // The settings, over the help while they're open.
+                // The settings, over the buttons while they're open.
                 p.Text(r++, 1, Style.Info, "Settings");
                 bool[] on = { pl.Loop, pl.ShowInputs, pl.ShowStats };
                 for (int i = 0; i < SettingNames.Length; i++)
                 {
                     int item = i;
-                    string text = $" {SettingNames[i],-14} {(on[i] ? "on" : "off"),-3}" +
+                    string text = $"{SettingNames[i],-15} {(on[i] ? "on" : "off"),-3}" +
                                   (i == 1 && clip.Inputs == null ? " (none in this clip)" : "");
-                    p.Button(r++, 0, text.PadRight(BottomScreen.Cols), WithPlayer(() =>
-                    {
-                        player.SettingsItem = item;
-                        ToggleSetting(item);
-                    }), i == pl.SettingsItem ? Style.Selected : Style.Normal);
+                    p.Button(r++, 1, text, WithPlayer(() => ToggleSetting(item)), width: BottomScreen.Cols - 2);
                 }
                 r++;
-                const string keys = "Up/Down: choose  Enter: change  ";
-                p.Text(r, 1, Style.Dim, keys);
-                p.Button(r, 1 + keys.Length, "S/Esc: close", WithPlayer(() => player.SettingsOpen = false), Style.Dim);
+                PlayerButtons(p, r, ("Close", null, () => player.SettingsOpen = false));
             }
             else if (pl.TrimMode)
             {
-                Help(p, r++, "Space", "Play / pause the selection", pl.PlayPause);
-                Help(p, r++, ",/.", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
-                Help(p, r++, "Left/Right", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
-                Help(p, r++, "I/O", "Start / end the selection here", pl.SetTrimIn, pl.SetTrimOut);
-                Help(p, r++, "Enter", "Save it as a new clip", AskSave);
-                Help(p, r++, "E", "Export it as an MP4", ExportFromPlayer);
-                Help(p, r++, "L", "Loop on/off", ToggleLoop);
-                Help(p, r++, "+/-", "Volume up / down", () => SetVolume(volume + 10), () => SetVolume(volume - 10));
-                Help(p, r++, "", "Click the bar to jump");
-                Help(p, r++, "T/Esc", "Stop trimming", pl.ToggleTrim, pl.ToggleTrim);
+                PlayerButtons(p, r++, (pl.Playing ? "Pause" : "Play the selection", "Space", pl.PlayPause));
+                PlayerButtons(p, r++, ("< Frame", ",", () => pl.Step(-1)), ("Frame >", ".", () => pl.Step(1)));
+                PlayerButtons(p, r++, ("< 1 s", "Left", () => pl.Jump(-1)), ("1 s >", "Right", () => pl.Jump(1)));
+                PlayerButtons(p, r++, ("Start here", null, pl.SetTrimIn), ("End here", null, pl.SetTrimOut));
+                PlayerButtons(p, r++, ("Save as a new clip", null, AskSave));
+                PlayerButtons(p, r++, (pl.Loop ? "Loop on" : "Loop off", null, ToggleLoop));
+                r++;
+                PlayerButtons(p, r++, ("Export the selection as MP4", null, ExportFromPlayer), ("Stop trimming", null, pl.ToggleTrim));
             }
             else
             {
-                Help(p, r++, "Space", "Play / pause", pl.PlayPause);
-                Help(p, r++, ",/.", "Previous / next frame", () => pl.Step(-1), () => pl.Step(1));
-                Help(p, r++, "Left/Right", "Back / forward 1 second", () => pl.Jump(-1), () => pl.Jump(1));
-                Help(p, r++, "Up/Down", "Speed", () => pl.ChangeSpeed(1), () => pl.ChangeSpeed(-1));
-                Help(p, r++, "+/-", "Volume up / down", () => SetVolume(volume + 10), () => SetVolume(volume - 10));
-                Help(p, r++, "S", "Settings (loop, inputs, ...)", () => pl.SettingsOpen = true);
-                Help(p, r++, "", "Click the bar to jump");
-                Help(p, r++, "T", "Trim", pl.Clip.IsRaw ? null : (Action)pl.ToggleTrim);
-                Help(p, r++, "E", "Export as an MP4", ExportFromPlayer);
-                Help(p, r++, "Esc", "Back to the clip list", ClosePlayer);
+                PlayerButtons(p, r++, (pl.Playing ? "Pause" : "Play", "Space", pl.PlayPause));
+                PlayerButtons(p, r++, ("< Frame", ",", () => pl.Step(-1)), ("Frame >", ".", () => pl.Step(1)));
+                PlayerButtons(p, r++, ("< 1 s", "Left", () => pl.Jump(-1)), ("1 s >", "Right", () => pl.Jump(1)));
+                PlayerButtons(p, r++, ("Slower", null, pl.Speed > 0 ? () => pl.ChangeSpeed(-1) : (Action)null),
+                                 ("Faster", null, pl.Speed + 1 < Player.SpeedNames.Length ? () => pl.ChangeSpeed(1) : (Action)null));
+                r++;
+                PlayerButtons(p, r++, ("Settings", null, () => pl.SettingsOpen = true), ("Trim", null, pl.Clip.IsRaw ? null : (Action)pl.ToggleTrim),
+                                 ("Export as MP4", null, ExportFromPlayer));
+                PlayerButtons(p, r++, ("Back to the clip list", null, ClosePlayer));
             }
+            p.Text(Math.Max(r + 1, p.Rows - 1), 1, Style.Dim, "Click or drag along the bar to jump.");
         }
 
         // ---- Closing

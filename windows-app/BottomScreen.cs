@@ -19,6 +19,9 @@ namespace FlashbackStudio
         public static readonly Color Damaged = Color.FromArgb(110, 20, 20);    // ...or that can't be
         public static readonly Color Cut = Color.FromArgb(20, 20, 20);         // trimming: the bar outside the selection...
         public static readonly Color Mark = Color.FromArgb(255, 200, 0);       // ...and its start and end
+        public static readonly Color Button = Color.FromArgb(52, 52, 52);      // a button...
+        public static readonly Color ButtonEdge = Color.FromArgb(110, 110, 110);
+        public static readonly Color ButtonOff = Color.FromArgb(28, 28, 28);   // ...one that can't be pressed now
 
         public static Color Fore(Style s)
         {
@@ -224,15 +227,50 @@ namespace FlashbackStudio
             return r;
         }
 
-        // Clickable text: highlighted (the selected style) under the mouse.
-        // Returns the column after it.
-        public int Button(int r, int col, string text, Action click, Style style = Style.Normal)
+        // A button on row r: 'label' in a box, with the key that does the same
+        // (if any) after it, dimmer. Under the mouse (or 'lit': the setting
+        // chosen with the keys) it lights up in the selected style, and it's
+        // greyed out with no 'click'. 'width' makes it at least that many
+        // columns wide. Returns the column after it.
+        public int Button(int r, int col, string label, Action click, string key = null, bool lit = false, int width = 0)
         {
-            Rectangle at = s.Cells(r, col, text.Length);
-            bool hover = at.Contains(s.mouse);
-            Text(r, col, hover ? Style.Selected : style, text);
-            Clickable(at, click);
-            return col + text.Length;
+            int cols = Math.Max(width, label.Length + (key != null ? key.Length + 1 : 0) + 2);
+            Rectangle at = s.Cells(r, col, cols);
+            Rectangle box = new Rectangle(at.X, at.Y + 1, at.Width - 1, at.Height - 3);
+            bool on = lit || (click != null && box.Contains(s.mouse));
+            Color face = on ? Theme.Back(Style.Selected).Value : click == null ? Theme.ButtonOff : Theme.Button;
+            Color edge = on ? Color.White : Theme.ButtonEdge;
+            using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(box, Math.Max(3, s.CellW / 2)))
+            using (Brush b = new SolidBrush(face))
+            using (Pen pen = new Pen(edge))
+            {
+                G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                G.FillPath(b, path);
+                G.DrawPath(pen, path);
+                G.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+            }
+            Color fore = on ? Color.Black : click == null ? Theme.Fore(Style.Dim) : Color.White;
+            TextRenderer.DrawText(G, label, s.Regular, new Point(at.X + s.CellW, at.Y + 1), fore,
+                                  TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            if (key != null)
+                TextRenderer.DrawText(G, key, s.Regular, new Point(at.X + (label.Length + 2) * s.CellW, at.Y + 1),
+                                      on ? Color.FromArgb(90, 90, 90) : Theme.Fore(Style.Dim),
+                                      TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            if (click != null)
+                Clickable(box, click);
+            return col + cols;
+        }
+
+        static System.Drawing.Drawing2D.GraphicsPath Rounded(Rectangle box, int radius)
+        {
+            int d = radius * 2;
+            System.Drawing.Drawing2D.GraphicsPath path = new System.Drawing.Drawing2D.GraphicsPath();
+            path.AddArc(box.X, box.Y, d, d, 180, 90);
+            path.AddArc(box.Right - d, box.Y, d, d, 270, 90);
+            path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
+            path.AddArc(box.X, box.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         public void Clickable(Rectangle at, Action click) => s.hits.Add(new BottomScreen.Hit { Rect = at, Click = click });

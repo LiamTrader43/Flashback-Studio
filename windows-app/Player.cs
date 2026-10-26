@@ -26,7 +26,6 @@ namespace FlashbackStudio
         public int Speed = SpeedNormal;
         public string Error;                // why the clip can't be read further
         public bool SettingsOpen;
-        public int SettingsItem;
         public double DecodeMs, DrawMs;     // last frame's read + decode, and drawing, times
         public int Skipped;                 // stored frames passed over without being shown
 

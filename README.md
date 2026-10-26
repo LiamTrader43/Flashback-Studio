@@ -31,61 +31,38 @@ The 3DS app on a PC, with its two screens side by side: the top screen (left) sh
 2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC, or put the SD card in your PC.
 3. Open `FlashbackStudio.exe`.
 
-It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, press **O**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`.
+It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, click **Open folder**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`.
 
 ### Using it
 
-It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-the-3ds)), with keys instead of the buttons, and the mouse instead of the touch screen: the keys are listed at the bottom of the bottom screen, and clicking one does what it says. Click a clip to select it, and click it again to play it.
+It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-the-3ds)), with the mouse instead of the 3DS's buttons and touch screen: the bottom screen has a button for everything. Click a clip to select it, and click it again to play it.
 
-| Clip list | |
-|---|---|
-| Arrow keys | Select a clip |
-| Enter (or click the selected clip) | Play the clip |
-| T | Trim the clip |
-| E | Export the clip as an MP4 (see below) |
-| Shift+E | Export every clip as an MP4 |
-| C | Compact the clip (asks first) |
-| F2 | Rename the clip (spaces become dashes; names Windows can't use are refused) |
-| Delete | Delete the clip (asks first): it goes to the Recycle Bin, or on an SD card, is deleted for good |
-| F5 | Read the folder again |
-| O | Open another folder |
+The clip list's buttons: **Play**, **Trim**, **Export** (an MP4, see below), **Compact** (asks first), **Rename** (spaces become dashes; names Windows can't use are refused), **Delete** (asks first: it goes to the Recycle Bin, or on an SD card, is deleted for good), **Refresh** (reads the folder again), **Export all** and **Open folder**. The mouse wheel scrolls the grid.
 
-| Playing a clip | |
+While a clip plays, three things have keys too:
+
+| Key | |
 |---|---|
 | Space (or click the picture) | Play/pause |
 | , / . | Previous/next frame (pauses; hold to repeat) |
 | Left/Right | Back/forward 1 second |
-| Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
-| + / - (or drag the volume slider) | Volume, while trimming too. It's only the player's: exported MP4s have the sound as recorded. It's remembered for next time. |
-| S | Settings: Loop, Input display, Timing details |
-| Click or drag along the bar | Jump to that point |
-| T | Trim |
-| E | Export as an MP4 |
-| Esc | Back to the clip list |
 
-| Trimming | |
-|---|---|
-| I / O | Start / end the selection at this frame |
-| Space | Play/pause the selection |
-| , / . | Previous/next frame |
-| Left/Right | Back/forward 1 second |
-| Enter | Save the selection as a new clip (asks first) |
-| E | Export the selection as an MP4 |
-| L | Loop on/off |
-| T or Esc | Stop trimming |
+The player's buttons also change the speed (**Slower**, **Faster**: 1/4x, 1/2x, 1x, 2x), and open the **Settings** (Loop, Input display, Timing details), **Trim**, **Export as MP4**, or go **Back to the clip list**. Click or drag along the bar to jump there. The volume slider sets the player's volume (exported MP4s have the sound as recorded); it's remembered for next time.
 
-Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting, trimming, renaming and deleting do exactly what they do on the 3DS, and write exactly the same clips, so clips can go back and forth between the two. Esc cancels compacting or trimming at any time, and leaves the clip as it was.
+While trimming, the same keys work, and the buttons set the **Start here** and **End here** of the selection, **Save as a new clip** (asks first), turn the **Loop** on and off, **Export the selection as MP4**, or **Stop trimming**.
+
+Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting, trimming, renaming and deleting do exactly what they do on the 3DS, and write exactly the same clips, so clips can go back and forth between the two. **Cancel** stops compacting or trimming at any time, and leaves the clip as it was.
 
 ### Exporting MP4s
 
-**E** exports the selected clip (or, while trimming, the selection), and **Shift+E** every clip in the folder. Each MP4 goes next to its clip (`clip_<date>.mp4`; a trimmed selection's as `<name>-trim.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 goes next to its clip (`clip_<date>.mp4`; a trimmed selection's as `<name>-trim.mp4`): H.264 video at twice the clip's size with sharp, unblurred pixels, at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
 
 Before it starts, it asks:
 
-* **Input display** (**I** to change; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
-* **Exporting every clip:** clips that already have an MP4 are skipped, so it's safe to export the same folder again. **R** replaces their MP4s instead (to export them again with the input display switched off, for example).
+* **Input display** (click **on**/**off** to change it; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
+* **Exporting every clip:** clips that already have an MP4 are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
 
-Esc stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
+**Cancel** stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
 
 ### If something goes wrong
 
