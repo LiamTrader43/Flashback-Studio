@@ -31,7 +31,7 @@ The 3DS app on a PC, with its two screens side by side: the top screen (left) sh
 2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC, or put the SD card in your PC.
 3. Open `FlashbackStudio.exe`.
 
-It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, click **Open folder**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`.
+It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, click **Open folder**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`. It also remembers the window's size and place.
 
 ### Using it
 
@@ -64,7 +64,7 @@ Before it starts, it asks:
 * **Input display** (click **on**/**off** to change it; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
 * **Exporting every clip:** each MP4 is named after its clip. Clips that already have an MP4 in the folder are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
 
-**Cancel** stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
+When it's done, **Show in folder** (under the message) opens File Explorer at the MP4, or at the folder of them. **Cancel** stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
 
 ### If something goes wrong
 

@@ -16,6 +16,8 @@
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <Product>Flashback Studio</Product>
     <Description>Plays, trims, compacts and exports Flashback clips (.flb)</Description>
+    <!-- The release's version: shown in the title bar -->
+    <Version>3.0.0</Version>
     <DebugType>none</DebugType>
     <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
   </PropertyGroup>

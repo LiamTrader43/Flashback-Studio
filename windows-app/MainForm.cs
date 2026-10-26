@@ -58,15 +58,27 @@ namespace FlashbackStudio
         Thread job;
         CancellationTokenSource jobCancel;
         volatile string jobTitle, jobName, jobDetail;
+        volatile string jobShow;        // what the job made, to show in Explorer (an MP4, or the folder of them)
+        string showPath, showFor;       // that, and the message it goes with (Show in folder, under it)
         double jobDone;                 // (0 to 1)
         bool closing;                   // close once the job has stopped
 
         ClipInfo Selected => selected < clips.Count ? clips[selected] : null;
+
+        // This build's version ("v3.0"), from FlashbackStudio.csproj's <Version>.
+        static string AppVersion
+        {
+            get
+            {
+                System.Version v = typeof(MainForm).Assembly.GetName().Version;
+                return $"v{v.Major}.{v.Minor}" + (v.Build > 0 ? $".{v.Build}" : "");
+            }
+        }
         int S(int px) => px * DeviceDpi / 96;
 
         public MainForm(string[] paths)
         {
-            Text = "Flashback Studio";
+            Text = "Flashback Studio " + AppVersion;
             using (Stream icon = typeof(MainForm).Assembly.GetManifestResourceStream("icon.ico"))
                 Icon = new Icon(icon);
             BackColor = Color.FromArgb(24, 24, 24);
@@ -180,22 +192,34 @@ namespace FlashbackStudio
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
-            LoadSettings(out string last);
+            LoadSettings(out string last, out Rectangle? window, out bool maximized);
+            // Where the window was, if that's still on a screen (most of its title bar, at least).
+            if (window.HasValue && Screen.AllScreens.Any(screen =>
+                    Rectangle.Intersect(screen.WorkingArea, new Rectangle(window.Value.X, window.Value.Y, window.Value.Width, S(30))).Width >= S(100)))
+            {
+                StartPosition = FormStartPosition.Manual;
+                Bounds = new Rectangle(window.Value.Location, new Size(Math.Max(window.Value.Width, MinimumSize.Width),
+                                                                       Math.Max(window.Value.Height, MinimumSize.Height)));
+            }
+            if (maximized)
+                WindowState = FormWindowState.Maximized;
             if (startPath != null && (File.Exists(startPath) || Directory.Exists(startPath)))
                 OpenPath(startPath);
             else
                 OpenFolder(StartFolder(last), null);
         }
 
-        // ---- What's remembered: the folder opened last, and the volume
+        // ---- What's remembered: the folder opened last, the volume, where exports go, and the window
 
         static string SettingsFile =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "settings.txt");
 
         // (A line "name=value" each.)
-        void LoadSettings(out string lastFolder)
+        void LoadSettings(out string lastFolder, out Rectangle? window, out bool maximized)
         {
             lastFolder = null;
+            window = null;
+            maximized = false;
             try
             {
                 foreach (string line in File.ReadAllLines(SettingsFile))
@@ -208,6 +232,16 @@ namespace FlashbackStudio
                         exportFolder = value.Length > 0 ? value : null;
                     else if (name == "volume" && int.TryParse(value, out int v))
                         volume = Math.Max(0, Math.Min(100, v));
+                    else if (name == "window")
+                    {
+                        // x, y, width, height, and 1 if it was maximized
+                        int[] n = value.Split(',').Select(part => int.TryParse(part, out int k) ? k : -1).ToArray();
+                        if (n.Length == 5 && n[2] > 0 && n[3] > 0)
+                        {
+                            window = new Rectangle(n[0], n[1], n[2], n[3]);
+                            maximized = n[4] == 1;
+                        }
+                    }
                 }
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -220,7 +254,10 @@ namespace FlashbackStudio
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(SettingsFile));
-                File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder });
+                // (The window's size when it isn't maximized or minimized, and whether it's maximized.)
+                Rectangle w = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+                File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder,
+                                                         $"window={w.X},{w.Y},{w.Width},{w.Height},{(WindowState == FormWindowState.Maximized ? 1 : 0)}" });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
             {
@@ -555,7 +592,13 @@ namespace FlashbackStudio
                 }
             }
             if (message != null)
-                p.Wrap(d + 5, d + DetailRows - 1, messageOk ? Style.Info : Style.Warn, message, 1);
+            {
+                // (After an export: a button to show it, under the message.)
+                bool show = showPath != null && ReferenceEquals(message, showFor);
+                p.Wrap(d + 5, show ? d + 5 : d + DetailRows - 1, messageOk ? Style.Info : Style.Warn, message, 1);
+                if (show)
+                    Choice(p, d + 6, 1, "Show in folder", ShowExported, false);
+            }
 
             if (clips.Count > 0)
             {
@@ -1010,6 +1053,7 @@ namespace FlashbackStudio
                     {
                         return ("Exporting stopped; no MP4 was saved.", true, null);
                     }
+                    jobShow = mp4;
                     return ($"Exported {name} in {(int)sw.Elapsed.TotalSeconds} s.", true, null);
                 });
                 return;
@@ -1026,6 +1070,7 @@ namespace FlashbackStudio
                 SetMessage("Every clip has its MP4 already (R replaces them).", true);
                 return;
             }
+            string dir = ExportDir();
             RunJob("Exporting...", "", token =>
             {
                 long total = Math.Max(1, todo.Sum(c => (long)c.FrameCount)), before = 0;
@@ -1058,6 +1103,8 @@ namespace FlashbackStudio
                     result += $"; {skipped} had an MP4";
                 if (failures > 0)
                     result += $"; {failures} failed: {failed}";
+                if (exported > 0)
+                    jobShow = dir;
                 return (result + ".", failures == 0, null);
             });
         }
@@ -1078,6 +1125,7 @@ namespace FlashbackStudio
             jobTitle = title;
             jobName = name;
             jobDetail = "";
+            jobShow = null;
             jobDone = 0;
             jobCancel = new CancellationTokenSource();
             CancellationToken token = jobCancel.Token;
@@ -1122,6 +1170,26 @@ namespace FlashbackStudio
             }
             Rescan(true, select);
             SetMessage(text, ok);
+            showPath = jobShow;
+            showFor = text;
+        }
+
+        // Shows what the last export made in Explorer: the MP4 selected, or the folder of them.
+        void ShowExported()
+        {
+            try
+            {
+                if (File.Exists(showPath))
+                    Process.Start("explorer.exe", $"/select,\"{showPath}\"");
+                else if (Directory.Exists(showPath))
+                    Process.Start("explorer.exe", $"\"{showPath}\"");
+                else
+                    SetMessage("It isn't there any more.", false);
+            }
+            catch (Exception e) when (e is System.ComponentModel.Win32Exception || e is InvalidOperationException)
+            {
+                SetMessage("Explorer couldn't be opened.", false);
+            }
         }
 
         void CancelJob()
@@ -1561,6 +1629,7 @@ namespace FlashbackStudio
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            SaveSettings();     // (the window, as it was)
             player?.Dispose();
             player = null;
             if (fineTimer)
