@@ -70,7 +70,7 @@ namespace FlashbackStudio
 
         ClipInfo Selected => selected < clips.Count ? clips[selected] : null;
 
-        // This build's version ("v3.0"), from FlashbackStudio.csproj's <Version>.
+        // This build's version ("v3.1"), from FlashbackStudio.csproj's <Version>.
         static string AppVersion
         {
             get
