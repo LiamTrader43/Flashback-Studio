@@ -60,15 +60,15 @@ namespace FlashbackStudio
 
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
-            bool chosen = e.Item is ToolStripMenuItem item && item.Checked;
-            Color face = chosen ? (e.Item.Selected ? Theme.RedHover : Theme.Red) : e.Item.Selected ? Theme.ButtonHover : Theme.Button;
+            bool chosen = e.Item is ToolStripMenuItem item && item.Checked, hover = e.Item.Selected && e.Item.Enabled;
+            Color face = chosen ? (hover ? Theme.RedHover : Theme.Red) : hover ? Theme.ButtonHover : Theme.Button;
             using (Brush b = new SolidBrush(face))
                 e.Graphics.FillRectangle(b, new Rectangle(Point.Empty, e.Item.Size));
         }
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
-            e.TextColor = Color.White;
+            e.TextColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);    // (one that can't be chosen: grey)
             base.OnRenderItemText(e);
         }
 

@@ -12,7 +12,8 @@
 //    3ds-app/source/main.c), for many inputs;
 //  - whole exports with ffmpeg, if it's found (on PATH): the frames, the input
 //    display and the sound in the MP4, a trimmed part, replacing an MP4,
-//    stopping, and a clip that turns out damaged part way.
+//    stopping, and a clip that turns out damaged part way; encoded by the GPU
+//    too, if this PC has an NVIDIA card.
 //
 // usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>
 // It writes its clips in the current folder.
@@ -665,7 +666,8 @@ static class WindowsAppTest
     // Converts 'clip' and checks the MP4's frames and sound.
     // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed part.)
     static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0,
-                                ExportSize videoSize = ExportSize.Double, ExportScaling scaling = ExportScaling.Nearest)
+                                ExportSize videoSize = ExportSize.Double, ExportScaling scaling = ExportScaling.Nearest,
+                                ExportEncoder encoder = ExportEncoder.Cpu)
     {
         checks++;
         string mp4 = Path.ChangeExtension(clip, ".mp4");
@@ -674,7 +676,7 @@ static class WindowsAppTest
         try
         {
             using (FlbClip c = FlbClip.Open(clip))
-                Converter.ToMp4(c, first, frames, mp4, inputs, videoSize, scaling, ffmpeg, _ => { }, CancellationToken.None);
+                Converter.ToMp4(c, first, frames, mp4, inputs, videoSize, scaling, encoder, ffmpeg, _ => { }, CancellationToken.None);
         }
         catch (Exception x)
         {
@@ -751,6 +753,15 @@ static class WindowsAppTest
         CheckConversion("1800x1080, bicubic", ffmpeg, "big.flb", s, true, videoSize: ExportSize.P1080, scaling: ExportScaling.Bicubic);
         CheckConversion("800x480, lanczos, a trimmed part", ffmpeg, "big.flb", s, true, 3, 9, scaling: ExportScaling.Lanczos);
         CheckConversion("2400x1440, nearest, compacted", ffmpeg, "plain.flb", plain, true, videoSize: ExportSize.P1440);
+        // Encoded by the GPU, if this PC has one ffmpeg can use (an NVIDIA card).
+        if (Converter.GpuAvailable(ffmpeg))
+        {
+            CheckConversion("by the GPU", ffmpeg, "big.flb", s, true, encoder: ExportEncoder.Gpu);
+            CheckConversion("by the GPU, 1800x1080, bicubic, a trimmed part", ffmpeg, "big.flb", s, true, 2, 8, ExportSize.P1080,
+                            ExportScaling.Bicubic, ExportEncoder.Gpu);
+        }
+        else
+            Console.WriteLine("  no NVIDIA encoder here: exports by the GPU weren't tested");
 
         // Stopping, and a clip that turns out damaged part way (scaled here, and
         // by ffmpeg): the MP4 that was there is left as it was, and nothing else
@@ -763,7 +774,7 @@ static class WindowsAppTest
             try
             {
                 using (FlbClip c = FlbClip.Open(clip))
-                    Converter.ToMp4(c, "big.mp4", true, ExportSize.Double, scaling, ffmpeg, _ => { }, cancel);
+                    Converter.ToMp4(c, "big.mp4", true, ExportSize.Double, scaling, ExportEncoder.Cpu, ffmpeg, _ => { }, cancel);
                 Fail($"{what}: finished");
             }
             catch (Exception x)

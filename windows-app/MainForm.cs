@@ -22,7 +22,7 @@ namespace FlashbackStudio
         enum Mode { List, Rename, ConfirmDelete, ConfirmCompact, ConfirmExport, ConfirmExportAll, Job, Player }
 
         const int GridCols = 3;
-        const int DetailRows = 7;
+        const int DetailRows = 8;
         const int HintRows = 4;
 
         readonly TopScreen top = new TopScreen();
@@ -43,7 +43,10 @@ namespace FlashbackStudio
         // Exporting
         bool exportInputs = true, exportReplace;
         ExportSize exportSize;          // the video's size...
-        ExportScaling exportScaling;    // ...and how it's scaled up to it, remembered
+        ExportScaling exportScaling;    // ...how it's scaled up to it...
+        ExportEncoder exportEncoder;    // ...and what encodes it, remembered
+        bool? gpuFound;                 // the GPU can encode here (null until that's been checked...)
+        bool gpuChecking;               // ...which it's being)
         string exportFolder;            // where exports go (null: next to their clips), remembered
         int exportFirst, exportCount;   // the frames to export (all of them, or a trimmed part)...
         string exportPath;              // ...of this clip
@@ -211,8 +214,8 @@ namespace FlashbackStudio
                 OpenFolder(StartFolder(last), null);
         }
 
-        // ---- What's remembered: the folder opened last, the volume, where exports go, their size and
-        // scaling, and the window
+        // ---- What's remembered: the folder opened last, the volume, where exports go, their size,
+        // scaling and encoder, and the window
 
         static string SettingsFile =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "settings.txt");
@@ -240,6 +243,9 @@ namespace FlashbackStudio
                     else if (name == "scaling" && Enum.TryParse(value, out ExportScaling scaling) &&
                              Enum.IsDefined(typeof(ExportScaling), scaling))
                         exportScaling = scaling;
+                    else if (name == "encoder" && Enum.TryParse(value, out ExportEncoder encoder) &&
+                             Enum.IsDefined(typeof(ExportEncoder), encoder))
+                        exportEncoder = encoder;
                     else if (name == "window")
                     {
                         // x, y, width, height, and 1 if it was maximized
@@ -265,7 +271,7 @@ namespace FlashbackStudio
                 // (The window's size when it isn't maximized or minimized, and whether it's maximized.)
                 Rectangle w = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
                 File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder,
-                                                         "size=" + exportSize, "scaling=" + exportScaling,
+                                                         "size=" + exportSize, "scaling=" + exportScaling, "encoder=" + exportEncoder,
                                                          $"window={w.X},{w.Y},{w.Width},{w.Height},{(WindowState == FormWindowState.Maximized ? 1 : 0)}" });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -480,17 +486,18 @@ namespace FlashbackStudio
 
         // A dropdown in a line of text, at row r, column col: a button 'width'
         // columns wide saying 'label' (what's chosen), which opens a list of
-        // 'options' under it (the chosen one red) to pick another. Returns the
-        // column after it.
-        int Dropdown(Painter p, int r, int col, int width, string label, string[] options, int chosen, Action<int> choose)
+        // 'options' under it (the chosen one red) to pick another (the ones
+        // 'enabled' says, if it's given). Returns the column after it.
+        int Dropdown(Painter p, int r, int col, int width, string label, string[] options, int chosen, Action<int> choose,
+                     bool[] enabled = null)
         {
             Rectangle at = p.Cells(r, col, width);
             Rectangle box = new Rectangle(at.X, at.Y + S(1), at.Width, at.Height - S(2));
-            p.Button(box, label + " ▾", () => ShowDropdown(box, options, chosen, choose));
+            p.Button(box, label + " ▾", () => ShowDropdown(box, options, chosen, choose, enabled));
             return col + width;
         }
 
-        void ShowDropdown(Rectangle under, string[] options, int chosen, Action<int> choose)
+        void ShowDropdown(Rectangle under, string[] options, int chosen, Action<int> choose, bool[] enabled)
         {
             ContextMenuStrip menu = new ContextMenuStrip
             {
@@ -502,7 +509,7 @@ namespace FlashbackStudio
             for (int i = 0; i < options.Length; i++)
             {
                 int pick = i;
-                ToolStripMenuItem item = new ToolStripMenuItem(options[i]) { Checked = i == chosen };
+                ToolStripMenuItem item = new ToolStripMenuItem(options[i]) { Checked = i == chosen, Enabled = enabled?[i] ?? true };
                 item.Click += (s, e) =>
                 {
                     choose(pick);
@@ -579,11 +586,12 @@ namespace FlashbackStudio
                     PaintVideoChoices(p, d + 3, c);
                     PaintInputsChoice(p, d + 4, c.HasInputs);
                     p.Right(d + 4, Style.Normal, $"{Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")} ");
+                    PaintEncoderChoice(p, d + 5);
                     string problem = ExportProblem();
                     if (problem != null)
-                        p.Wrap(d + 5, d + 6, Style.Warn, problem, 1);
+                        p.Wrap(d + 6, d + 7, Style.Warn, problem, 1);
                     else if (File.Exists(ExportMp4()))
-                        p.Wrap(d + 5, d + 6, Style.Warn, "There's already an MP4 with that name there: it will be replaced.", 1);
+                        p.Wrap(d + 6, d + 7, Style.Warn, "There's already an MP4 with that name there: it will be replaced.", 1);
                     Answers(p, "Export", problem == null ? Export : (Action)null, Cancel);
                     return;
                 }
@@ -595,14 +603,15 @@ namespace FlashbackStudio
                     p.Text(d + 2, 1, Style.Dim, "Each MP4 is named after its clip.");
                     PaintVideoChoices(p, d + 3, null);
                     PaintInputsChoice(p, d + 4, true);
+                    PaintEncoderChoice(p, d + 5);
                     string problem = ExportFolderProblem();
                     if (problem != null)
-                        p.Wrap(d + 5, d + 6, Style.Warn, problem, 1);
+                        p.Wrap(d + 6, d + 7, Style.Warn, problem, 1);
                     else if (have > 0)
                     {
                         string text = $"{have} already ha{(have == 1 ? "s" : "ve")} an MP4 there: ";
-                        p.Text(d + 5, 1, Style.Normal, text);
-                        Choice(p, d + 5, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
+                        p.Text(d + 6, 1, Style.Normal, text);
+                        Choice(p, d + 6, 1 + text.Length, exportReplace ? "replace" : "skip", ToggleExportReplace, false);
                     }
                     Answers(p, "Export", problem == null ? Export : (Action)null, Cancel);
                     return;
@@ -687,6 +696,22 @@ namespace FlashbackStudio
                 exportScaling = (ExportScaling)i;
                 SaveSettings();
             });
+        }
+
+        // What encodes the video: a dropdown. If the GPU can't here (no NVIDIA
+        // card, or no driver for it), it's the CPU, and the GPU can't be chosen.
+        void PaintEncoderChoice(Painter p, int r)
+        {
+            bool gpu = exportEncoder == ExportEncoder.Gpu && gpuFound != false;
+            p.Text(r, 1, Style.Normal, "Encoder:");
+            string[] items = { "CPU (x264)", gpuFound == false ? "GPU (no NVIDIA card found)" : "GPU (NVIDIA NVENC)" };
+            int col = Dropdown(p, r, 10, 7, gpu ? "GPU" : "CPU", items, gpu ? 1 : 0, i =>
+            {
+                exportEncoder = (ExportEncoder)i;
+                SaveSettings();
+            }, new[] { true, gpuFound != false });
+            if (gpuFound == false)
+                p.Text(r, col + 1, Style.Dim, "(no NVIDIA card found)");
         }
 
         void PaintInputsChoice(Painter p, int r, bool any)
@@ -1059,6 +1084,7 @@ namespace FlashbackStudio
         // of exportPath, with 'name' to start with, in the box to type another.
         void AskExportName(string name)
         {
+            CheckGpu();
             exportNameBox.Text = name;
             mode = Mode.ConfirmExport;
             bottom.Invalidate();
@@ -1088,6 +1114,32 @@ namespace FlashbackStudio
             return false;
         }
 
+        // Finds out whether the GPU can encode here, once, on a thread of its own
+        // (it takes a second or so): the first time an export is asked about.
+        void CheckGpu()
+        {
+            string ffmpeg = Converter.FindFfmpeg();
+            if (gpuFound != null || gpuChecking || ffmpeg == null)
+                return;
+            gpuChecking = true;
+            new Thread(() =>
+            {
+                bool found = Converter.GpuAvailable(ffmpeg);
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        gpuFound = found;
+                        bottom.Invalidate();
+                    }));
+                }
+                catch (InvalidOperationException)
+                {
+                    // (the window is gone)
+                }
+            }) { IsBackground = true, Name = "GPU check" }.Start();
+        }
+
         void AskExport()
         {
             ClipInfo c = Selected;
@@ -1103,6 +1155,7 @@ namespace FlashbackStudio
         {
             if (!clips.Any(c => c.Error == null) || !CheckFfmpeg())
                 return;
+            CheckGpu();
             mode = Mode.ConfirmExportAll;
             bottom.Invalidate();
         }
@@ -1113,6 +1166,9 @@ namespace FlashbackStudio
             bool inputs = exportInputs;
             ExportSize size = exportSize;
             ExportScaling scaling = exportScaling;
+            // (The GPU if it can encode here: if that isn't known yet, the job finds out first.)
+            bool gpu = exportEncoder == ExportEncoder.Gpu;
+            ExportEncoder Encoder() => gpu && Converter.GpuAvailable(ffmpeg) ? ExportEncoder.Gpu : ExportEncoder.Cpu;
             if (mode == Mode.ConfirmExport)
             {
                 string path = exportPath, mp4 = ExportMp4(), name = Path.GetFileName(mp4);
@@ -1123,8 +1179,9 @@ namespace FlashbackStudio
                     Stopwatch sw = Stopwatch.StartNew();
                     try
                     {
+                        ExportEncoder encoder = Encoder();
                         using (FlbClip clip = FlbClip.Open(path))
-                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, size, scaling, ffmpeg,
+                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, size, scaling, encoder, ffmpeg,
                                             done => Progress((double)done / count, $"Frame {done} of {count}"), token);
                     }
                     catch (OperationCanceledException)
@@ -1154,6 +1211,7 @@ namespace FlashbackStudio
                 long total = Math.Max(1, todo.Sum(c => (long)c.FrameCount)), before = 0;
                 int exported = 0, failures = 0;
                 string failed = null;
+                ExportEncoder encoder = Encoder();
                 for (int i = 0; i < todo.Count; i++)
                 {
                     ClipInfo c = todo[i];
@@ -1161,7 +1219,7 @@ namespace FlashbackStudio
                     try
                     {
                         using (FlbClip clip = FlbClip.Open(c.Path))
-                            Converter.ToMp4(clip, TargetMp4(c), inputs, size, scaling, ffmpeg,
+                            Converter.ToMp4(clip, TargetMp4(c), inputs, size, scaling, encoder, ffmpeg,
                                             done => Progress((before + done) / (double)total, $"Frame {done} of {c.FrameCount}"), token);
                         exported++;
                     }

@@ -102,4 +102,6 @@ of the MP4 must show the right picture (for ffmpeg's scaling, the picture as
 ffmpeg scales it on its own, with its colour at half the size, as H.264 keeps
 it), with the input display if asked, and the sound must last as long as the
 frames. Stopping part way, and a clip that turns out damaged part way, both
-ways, must leave the MP4 that was there as it was, and nothing else behind.
+ways, must leave the MP4 that was there as it was, and nothing else behind. If
+the PC has an NVIDIA graphics card, exports encoded by it (NVENC) are checked
+the same way.

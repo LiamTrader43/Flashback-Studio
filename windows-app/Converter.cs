@@ -17,8 +17,12 @@ namespace FlashbackStudio
     enum ExportSize { Double, P1080, P1440, P2160 }
 
     // ...and how its frames are scaled up to it: each pixel copied (nearest:
-    // sharp pixels), or smoothed, with ffmpeg's scaler.
+    // sharp pixels), or smoothed, with ffmpeg's scaler...
     enum ExportScaling { Nearest, Bilinear, Bicubic, Lanczos, Spline }
+
+    // ...and what encodes it: the CPU (x264), or an NVIDIA graphics card's
+    // encoder (NVENC), much faster for big videos.
+    enum ExportEncoder { Cpu, Gpu }
 
     // Exports clips as MP4 videos with ffmpeg: H.264 at the size asked for, at
     // the frame rate it was recorded at, with its sound as an AAC track, and the
@@ -64,6 +68,42 @@ namespace FlashbackStudio
         // ffmpeg's scale filter's flags, for each ExportScaling.
         public static readonly string[] ScaleFlags = { "neighbor", "bilinear", "bicubic", "lanczos", "spline" };
 
+        static readonly Dictionary<string, bool> gpuChecked = new Dictionary<string, bool>();
+
+        // Can ffmpeg at 'ffmpeg' encode with the GPU here (an NVIDIA card, with
+        // its driver)? It's tried once, on a tiny video: the first time takes a
+        // second or so.
+        public static bool GpuAvailable(string ffmpeg)
+        {
+            lock (gpuChecked)
+            {
+                if (gpuChecked.TryGetValue(ffmpeg, out bool known))
+                    return known;
+                bool ok = false;
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo(ffmpeg, "-hide_banner -loglevel error -f lavfi -i color=c=black:s=256x144:r=30 " +
+                                                                        "-frames:v 1 -c:v h264_nvenc -f null -")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardError = true,
+                    };
+                    using (Process p = Process.Start(psi))
+                    {
+                        p.StandardError.ReadToEndAsync();
+                        ok = p.WaitForExit(15000) && p.ExitCode == 0;
+                        Stop(p);
+                    }
+                }
+                catch (Exception e) when (e is Win32Exception || e is InvalidOperationException)
+                {
+                }
+                gpuChecked[ffmpeg] = ok;
+                return ok;
+            }
+        }
+
         // RGB565's 5- and 6-bit values as 8-bit ones.
         static readonly byte[] Five = new byte[32], Six = new byte[64];
 
@@ -106,14 +146,14 @@ namespace FlashbackStudio
         // exception saying what went wrong; either way, an MP4 that was there is
         // left as it was, and nothing else is left behind.
         public static void ToMp4(FlbClip clip, string mp4, bool showInputs, ExportSize size, ExportScaling scaling,
-                                 string ffmpeg, Action<int> progress, CancellationToken cancel) =>
-            ToMp4(clip, 0, clip.FrameCount, mp4, showInputs, size, scaling, ffmpeg, progress, cancel);
+                                 ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
+            ToMp4(clip, 0, clip.FrameCount, mp4, showInputs, size, scaling, encoder, ffmpeg, progress, cancel);
 
         // The same, for frames firstFrame .. firstFrame + frameCount - 1 of it
         // (a trimmed part), with their sound.
         public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, bool showInputs,
-                                 ExportSize size, ExportScaling scaling, string ffmpeg, Action<int> progress,
-                                 CancellationToken cancel)
+                                 ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
+                                 Action<int> progress, CancellationToken cancel)
         {
             (int w, int h) = VideoSize(clip.Width, clip.Height, size);
             bool here = size == ExportSize.Double && scaling == ExportScaling.Nearest;     // (each pixel 2 x 2, here)
@@ -135,9 +175,21 @@ namespace FlashbackStudio
                     clip.WriteWav(wav, firstFrame, frameCount);
                     args.Append($"-i \"{wav}\" -map 0:v -map 1:a ");
                 }
-                args.Append("-c:v libx264 -crf 12 -pix_fmt yuv420p ");
-                if (size != ExportSize.Double)
-                    args.Append("-preset faster ");     // (at 1080p, about 3 times quicker than the default, for much the same file)
+                if (encoder == ExportEncoder.Gpu)
+                {
+                    // The same quality as x264's below (on a real clip scaled to
+                    // 4K, PSNR 54.8 dB for both), encoded in about a third of the
+                    // time (6.6 s instead of 17.7), in files a third to a half
+                    // bigger. (A whole export gains less: the frames' way through
+                    // the scaler and here takes its time too.)
+                    args.Append("-c:v h264_nvenc -preset p4 -rc constqp -qp 12 -pix_fmt yuv420p ");
+                }
+                else
+                {
+                    args.Append("-c:v libx264 -crf 12 -pix_fmt yuv420p ");
+                    if (size != ExportSize.Double)
+                        args.Append("-preset faster ");     // (at 1080p, about 3 times quicker than the default, for much the same file)
+                }
                 if (clip.HasAudio)
                     args.Append("-c:a aac -b:a 192k -ar 48000 ");
                 args.Append($"-f mp4 \"{part}\"");
