@@ -1,3 +1,8 @@
+// Clips of long recordings at full resolution are over 2 GB, so file offsets
+// are 64-bit (off_t, with fseeko/ftello): they are on a 3DS anyway, and this
+// makes them so on a PC too, where the tests run.
+#define _FILE_OFFSET_BITS 64
+
 #include "flb.h"
 
 #include <stdlib.h>
@@ -93,18 +98,18 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
 {
     uint8_t t[FLB_TRAILER_SIZE];
 
-    if (fseek(file, 0, SEEK_END) != 0)
+    if (fseeko(file, 0, SEEK_END) != 0)
     {
         *error = "the file couldn't be read";
         return false;
     }
-    long length = ftell(file);
+    off_t length = ftello(file);
     if (length < FLB_TRAILER_SIZE)
     {
         *error = "not a Flashback clip (file too small)";
         return false;
     }
-    if (fseek(file, length - FLB_TRAILER_SIZE, SEEK_SET) != 0 || fread(t, 1, sizeof(t), file) != sizeof(t))
+    if (fseeko(file, length - FLB_TRAILER_SIZE, SEEK_SET) != 0 || fread(t, 1, sizeof(t), file) != sizeof(t))
     {
         *error = "the file couldn't be read";
         return false;
@@ -136,7 +141,7 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
     if (info->width == 0 || info->height == 0 || info->width > 400 || info->height > 240 ||
         info->slotBytes != info->width * info->height * 2 || info->fps == 0 || info->fps > 60 ||
         (info->version == FLB_VERSION_RECORDED && info->slotStride < info->slotBytes) ||
-        info->entryCount > (uint32_t)length / 12 ||
+        info->entryCount > (uint64_t)length / 12 ||
         (uint64_t)info->indexOffset + (uint64_t)info->entryCount * flbEntrySize(info) + flbAudioInfoSize(info) +
             FLB_TRAILER_SIZE != info->fileSize)
     {
@@ -147,7 +152,7 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
     if (info->version == FLB_VERSION_AUDIO)
     {
         uint8_t a[FLB_AUDIO_INFO_SIZE];
-        if (fseek(file, (long)(info->indexOffset + info->entryCount * 16), SEEK_SET) != 0 ||
+        if (fseeko(file, (off_t)info->indexOffset + (off_t)info->entryCount * 16, SEEK_SET) != 0 ||
             fread(a, 1, sizeof(a), file) != sizeof(a))
         {
             *error = "the file couldn't be read";
@@ -182,7 +187,7 @@ static void flbReadInputs(FlbClip *clip)
     uint8_t *raw = NULL;
 
     bool ok = info->inputOffset != 0 && (uint64_t)info->inputOffset + sizeof(h) <= info->indexOffset &&
-              fseek(clip->file, (long)info->inputOffset, SEEK_SET) == 0 && fread(h, 1, sizeof(h), clip->file) == sizeof(h);
+              fseeko(clip->file, info->inputOffset, SEEK_SET) == 0 && fread(h, 1, sizeof(h), clip->file) == sizeof(h);
     if (ok)
     {
         count = flbU32(h + 8);
@@ -247,7 +252,7 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         *error = "not enough memory for this clip";
         goto fail;
     }
-    if (fseek(clip->file, info->indexOffset, SEEK_SET) != 0 ||
+    if (fseeko(clip->file, info->indexOffset, SEEK_SET) != 0 ||
         fread(index, entrySize, info->entryCount, clip->file) != info->entryCount)
     {
         free(index);
@@ -333,7 +338,7 @@ bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **e
 
     // (The end of the last sector can be past the end of the file: only the
     // frame itself has to be there.)
-    if (fseek(clip->file, (long)(e->offset - skip), SEEK_SET) != 0 ||
+    if (fseeko(clip->file, e->offset - skip, SEEK_SET) != 0 ||
         fread(buf, 1, len, clip->file) < skip + e->size)
     {
         *error = "the file couldn't be read";
@@ -364,7 +369,7 @@ bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, c
     {
         uint32_t pos = (uint32_t)(a % info->audioCapacity);
         uint32_t n = (uint32_t)(b - a < info->audioCapacity - pos ? b - a : info->audioCapacity - pos);
-        if (fseek(clip->file, (long)(info->audioOffset + (uint64_t)pos * 4), SEEK_SET) != 0 ||
+        if (fseeko(clip->file, (off_t)info->audioOffset + (off_t)pos * 4, SEEK_SET) != 0 ||
             fread(dst + (a - first) * 2, 4, n, clip->file) != n)
         {
             *error = "the clip's audio couldn't be read";
@@ -710,7 +715,7 @@ int flbCompactStep(FlbCompactor *c, const char **error)
     {
         // (Read into the clip's frame buffer: a frame can straddle two blocks.)
         const FlbEntry *e = &c->clip.entries[c->next];
-        if (fseek(c->clip.file, (long)e->offset, SEEK_SET) != 0 ||
+        if (fseeko(c->clip.file, e->offset, SEEK_SET) != 0 ||
             fread(c->clip.stored, 1, e->size, c->clip.file) != e->size)
         {
             *error = "the clip couldn't be read";

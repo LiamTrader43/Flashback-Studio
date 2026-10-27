@@ -36,6 +36,11 @@ picture and the same inputs as in the original.
 It also damages a clip's inputs in several ways, and the clip must still open
 and play, without them.
 
+Last, it does the same with a clip over 2 GB, as a long recording at full
+resolution is (up to 3.6 GB): its frames, inputs and index are all past 2 GB.
+It's a sparse file, so the gap before the frames takes no room on the disk. On
+Windows, if the drive can't hold sparse files (FAT32 or exFAT), it's left out.
+
 ## Read-ahead test
 
 The runner copies the "Reading ahead" section, unchanged, into

@@ -4,10 +4,17 @@
    compacted and trimmed (from the start, the end and part way through a
    frame's copies), and every frame of every copy must show the same picture
    and the same inputs as in the original. A clip whose inputs are damaged must
-   still open and play, without them. */
+   still open and play, without them. So must a clip over 2 GB, as a long
+   recording at full resolution is. */
+#define _FILE_OFFSET_BITS 64    /* (fseeko past 2 GB, as flb.c) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#include <winioctl.h>
+#endif
 
 #include "flb.h"
 
@@ -37,19 +44,41 @@ static FlbInput inputOf(uint32_t f)
 /* entry e's picture */
 static uint16_t pixelOf(uint32_t e, uint32_t i) { return (uint16_t)(e * 977 + i * 31 + 5); }
 
-/* A clip as the recorder saves it: 'entries' frames, entry e shown copies[e] times. */
-static uint32_t writeRecorded(const char *path, bool audio, bool inputs, uint32_t entries, const uint32_t *copies)
+/* Makes a new, empty file sparse, so a gap skipped with fseeko takes no room on
+   the disk. Returns false if it can't be. */
+static bool makeSparse(FILE *f)
+{
+#ifdef _WIN32
+    DWORD ret;
+    return DeviceIoControl((HANDLE)_get_osfhandle(_fileno(f)), FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &ret, NULL) != 0;
+#else
+    (void)f;
+    return true;    /* (elsewhere, files are sparse anyway) */
+#endif
+}
+
+/* A clip as the recorder saves it: 'entries' frames, entry e shown copies[e]
+   times, after a gap of 'gap' bytes (sparse). Returns its frame count, or 0 if
+   it needs a gap and the file can't be sparse. */
+static uint32_t writeRecorded(const char *path, bool audio, bool inputs, uint32_t entries, const uint32_t *copies,
+                              uint32_t gap)
 {
     uint32_t frames = 0;
     for (uint32_t e = 0; e < entries; e++) frames += copies[e];
     uint32_t capacity = (uint32_t)((uint64_t)(frames + FPS) * RATE_MHZ / (FPS * 1000));   /* (room to spare) */
-    uint32_t videoOffset = audio ? (capacity * 4 + 511) / 512 * 512 : 0;
+    uint32_t videoOffset = (audio ? (capacity * 4 + 511) / 512 * 512 : 0) + gap;
     uint32_t dataEnd = videoOffset + entries * SLOT_STRIDE;
     uint32_t inputSize = inputs ? 16 + frames * 16 : 0;
 
     FILE *f = fopen(path, "wb");
+    if (gap != 0 && !makeSparse(f))
+    {
+        fclose(f);
+        remove(path);
+        return 0;
+    }
     for (uint32_t i = 0; audio && i < capacity; i++) { put16(f, (uint16_t)i); put16(f, (uint16_t)~i); }
-    zeros(f, (long)videoOffset - ftell(f));
+    fseeko(f, videoOffset, SEEK_SET);   /* (what's skipped reads back as zeros) */
     for (uint32_t e = 0; e < entries; e++)
     {
         for (uint32_t i = 0; i < W * H; i++) put16(f, pixelOf(e, i));
@@ -157,7 +186,7 @@ int main(void)
             copies[e] = rand() % 4 == 0 ? 2 + rand() % 3 : 1;     /* (missed frames: copies) */
             for (uint32_t k = 0; k < copies[e]; k++) entryOfFrame[n++] = e;
         }
-        uint32_t frames = writeRecorded(rec, audio, inputs, entries, copies);
+        uint32_t frames = writeRecorded(rec, audio, inputs, entries, copies, 0);
         uint32_t compactVersion = audio ? 3 : 2;
         checkCopy("recorded", rec, 0, frames, entryOfFrame, inputs, audio ? 3 : 1);
 
@@ -194,7 +223,7 @@ int main(void)
     };
     for (int d = 0; d < 4; d++)
     {
-        uint32_t frames = writeRecorded(rec, true, true, 3, copies);
+        uint32_t frames = writeRecorded(rec, true, true, 3, copies, 0);
         FlbClip clip;
         const char *error = NULL;
         flbOpen(&clip, rec, &error);
@@ -205,6 +234,29 @@ int main(void)
         else
             patch32(rec, -8, indexOffset - 8);      /* (the trailer's input offset: too near the index) */
         checkCopy(damage[d].what, rec, 0, frames, entryOfFrame, false, 3);
+    }
+
+    /* over 2 GB, as a long recording at full resolution is (up to 3.6 GB): its
+       frames, inputs and index all past 2 GB, after a gap that takes no room */
+    const char *big = "flbtest_big.flb";
+    uint32_t bigCopies[8] = { 1, 2, 1, 1, 3, 1, 1, 2 }, bigEntryOfFrame[12] = { 0, 1, 1, 2, 3, 4, 4, 4, 5, 6, 7, 7 };
+    uint32_t bigFrames = writeRecorded(big, true, true, 8, bigCopies, 3400000000u);
+    if (bigFrames == 0)
+        printf("(the clip over 2 GB is left out: no sparse files here)\n");
+    else
+    {
+        FlbCompactor c;
+        const char *error = NULL;
+        checkCopy("over 2 GB", big, 0, bigFrames, bigEntryOfFrame, true, 3);
+        remove(trim);
+        if (flbTrimBegin(&c, big, trim, 2, 7, &error) && runCopy(&c))
+            checkCopy("over 2 GB, trimmed", trim, 2, 7, bigEntryOfFrame, true, 3);
+        else if (error) FAIL("trimming the clip over 2 GB: %s\n", error);
+        error = NULL;
+        if (flbCompactBegin(&c, big, &error) && runCopy(&c))
+            checkCopy("over 2 GB, compacted", big, 0, bigFrames, bigEntryOfFrame, true, 3);
+        else if (error) FAIL("compacting the clip over 2 GB: %s\n", error);
+        remove(big);
     }
 
     remove(rec);

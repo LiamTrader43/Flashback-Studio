@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last 10 seconds to 2 minutes of gameplay and saves them on a button press.
+Tools for decompressing, converting, viewing and editing `.flb` clips recorded by [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback), the 3DS "replay buffer" that keeps the last 1 second to 10 minutes of gameplay and saves them on a button press.
 
 `.flb` clips use Flashback's own compressed format, so video players, video editors and other tools (plain ffmpeg included) can't open them. **Use Flashback Studio for Windows to turn them into normal videos.**
 
@@ -172,7 +172,7 @@ The new clip is saved next to the original as `<name>-trim.flb` (or `-trim2`, an
 
 ### Compacting clips
 
-A clip is as big as the uncompressed footage (at full resolution with sound, about 362 MB for 60 seconds and 724 MB for 2 minutes), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
+A clip is as big as the uncompressed footage (at full resolution with sound, about 362 MB for 60 seconds, 724 MB for 2 minutes and 3.6 GB for 10 minutes), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
 
 Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds (a 2-minute one about twice as long), and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
 
