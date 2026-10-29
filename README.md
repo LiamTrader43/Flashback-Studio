@@ -212,6 +212,10 @@ A compacted clip has the same frames back to back, with no unused space, and eac
 
 The recorded clip format is documented in [`sysmodules/rosalina/source/flashback_clip.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_clip.c) of Luma3DS-Flashback, and the frame compression next to `flashbackCompress` in [`flashback_compress.c`](https://github.com/LiamTrader43/Luma3DS-Flashback/blob/flashback/sysmodules/rosalina/source/flashback_compress.c). All three versions are described in [`3ds-app/source/flb.h`](3ds-app/source/flb.h); the readers in the Windows app and the 3DS app follow those descriptions.
 
+## Support
+
+If you'd like to support Flashback, you can on [Ko-fi](https://ko-fi.com/liamtrader).
+
 ## License
 
 GPLv3, like Luma3DS-Flashback. See [LICENSE](LICENSE).
