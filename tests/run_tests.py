@@ -94,6 +94,10 @@ def main():
     results.append(('clip reader and compactor test',
                     build_and_run(cc, 'flb_test', [os.path.join(HERE, 'flb_test.c'), os.path.join(SOURCE, 'flb.c')],
                                   ['-I', SOURCE])))
+    print('\n=== Huffman codes test', flush=True)
+    results.append(('Huffman codes test',
+                    build_and_run(cc, 'codes_test', [os.path.join(HERE, 'codes_test.c'), os.path.join(SOURCE, 'flb.c')],
+                                  ['-I', SOURCE])))
     print('\n=== read-ahead test', flush=True)
     extract_ahead()
     results.append(('read-ahead test', build_and_run(cc, 'ahead_test', [os.path.join(HERE, 'ahead_test.c')],

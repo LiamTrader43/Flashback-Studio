@@ -43,6 +43,15 @@
 //                 included. The trailer's word 10 (bytes 40-43) is where the
 //                 header starts, or 0 if there are none.
 //
+// A clip recorded on a New 3DS since Flashback packs frames with Huffman codes
+// has 0x100 (FLB_VERSION_CODES) added to its version, in any of the three, so
+// readers from before that turn it down as made by a newer Flashback rather than
+// showing it wrong. Its frames may be packed so (see flashbackHuffman in
+// Luma3DS-Flashback's flashback_compress.c, where the format is described): a
+// frame that starts with 0xFF, which no compressed frame does, holds Huffman
+// codes for its compressed bytes, two sets of them (one for op bytes, one for
+// the bytes after ops), their lengths in its first 264 bytes.
+//
 // All values little-endian. Frames are RGB565, top row first. Every frame is
 // compressed on its own, so any frame can be decoded without the ones before it.
 //
@@ -55,9 +64,12 @@
 #include <stdio.h>
 
 #define FLB_TRAILER_SIZE 48
+#define FLB_VERSION_CODES   0x100   // added to the version: frames may be packed with Huffman codes
+#define FLB_CODE_BITS       12      // the longest of those codes
 
 typedef struct FlbInfo {
     uint32_t version;       // 1: as recorded, 2: compacted, 3: with audio (either)
+    bool hasCodes;          // frames may be packed with Huffman codes (FLB_VERSION_CODES)
     uint32_t width, height, fps;
     uint32_t slotStride;    // bytes between ring slots (0 once compacted)
     uint32_t slotBytes;     // size of an uncompressed frame
@@ -88,12 +100,21 @@ typedef struct FlbEntry {
     uint32_t audioPos;              // the audio sample it's first shown at (with audio)
 } FlbEntry;
 
+// What decoding a frame packed with Huffman codes takes (flbDecompress): each
+// set of codes by their next FLB_CODE_BITS bits, and the compressed bytes they
+// stand for. A clip has its own, so clips can be decoded on different threads.
+typedef struct FlbCodes {
+    uint16_t table[2][1 << FLB_CODE_BITS];  // byte value | code length << 8, or 0 where no code starts
+    uint8_t bytes[400 * 240 * 2];           // (a frame's compressed bytes are fewer than the frame's)
+} FlbCodes;
+
 typedef struct FlbClip {
     FILE *file;
     FlbInfo info;
     FlbEntry *entries;
     uint8_t *stored;        // one stored frame, as read from the file
     FlbInput *inputs;       // the inputs during each frame (frameCount of them), or NULL if the clip has none
+    FlbCodes *codes;        // for frames packed with Huffman codes (made for the first one)
 } FlbClip;
 
 // Reads and checks a clip's trailer. On failure returns false and points
@@ -114,9 +135,10 @@ uint32_t flbEntryForFrame(const FlbClip *clip, uint32_t frame);
 // On failure returns false and points 'error' at a message.
 bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **error);
 
-// Decompresses exactly 'pixels' pixels from exactly 'len' bytes. Returns false
-// if the data is malformed (never writes past 'dst' + 'pixels').
-bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels);
+// Decompresses exactly 'pixels' pixels from exactly 'len' bytes of a stored
+// frame (not stored raw), through 'codes' if it's packed with Huffman codes.
+// Returns false if the data is malformed (never writes past 'dst' + 'pixels').
+bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels, FlbCodes *codes);
 
 // Compacted already (version 2, or 3 without slots)?
 bool flbIsCompacted(const FlbInfo *info);

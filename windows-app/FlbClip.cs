@@ -36,6 +36,7 @@ namespace FlashbackStudio
         public const int AudioInfoSize = 32;
         public const int InputHeaderSize = 16;
         public const int InputRecordSize = 16;
+        public const uint VersionCodes = 0x100;    // added to the version: frames may be packed with Huffman codes
 
         // A stored frame: where it is in the file, its size, how many times it's
         // shown, the clip frame it's first shown at, and (with sound) the sample
@@ -50,6 +51,7 @@ namespace FlashbackStudio
         public string Path { get; }
         public bool IsRaw { get; private set; }         // an older .raw clip
         public uint Version { get; private set; }       // 1: as recorded, 2: compacted, 3: with sound (either)
+        public bool HasCodes { get; private set; }      // frames may be packed with Huffman codes (VersionCodes)
         public int Width { get; private set; }
         public int Height { get; private set; }
         public int Fps { get; private set; }
@@ -143,7 +145,7 @@ namespace FlashbackStudio
             ReadAt(length - TrailerSize, t, 0, TrailerSize);
             if (U32(t, 0) != Magic)
                 throw new InvalidDataException("not a Flashback clip (or the copy is incomplete)");
-            uint version = U32(t, 4);
+            uint version = U32(t, 4) & ~VersionCodes;
             if (version < 1 || version > 3)
                 throw new InvalidDataException("made by a newer Flashback version; get the latest Flashback Studio");
             int entrySize = version == 3 ? 16 : 12;
@@ -158,6 +160,7 @@ namespace FlashbackStudio
                 indexOffset + entryCount * entrySize + audioInfoSize + TrailerSize != length)
                 throw new InvalidDataException("the clip's header is damaged");
             Version = version;
+            HasCodes = (U32(t, 4) & VersionCodes) != 0;
             Width = (int)width;
             Height = (int)height;
             Fps = (int)fps;
@@ -280,8 +283,8 @@ namespace FlashbackStudio
 
         // The recorder's frame compression, QOI-style ops on RGB565 pixels (see
         // flashbackCompress in Luma3DS-Flashback's flashback_compress.c, and
-        // flbDecompress in flb.c). Returns false if the data is malformed.
-        static bool Decompress(byte[] src, int len, ushort[] dst, int pixels)
+        // flbDecodeOps in flb.c). Returns false if the data is malformed.
+        static bool DecodeOps(byte[] src, int len, ushort[] dst, int pixels)
         {
             ushort[] index = new ushort[64];
             ushort px = 0;
@@ -340,6 +343,108 @@ namespace FlashbackStudio
                 dst[i++] = px;
             }
             return p == len;
+        }
+
+        const int CodesHeader = 264;    // a frame packed with Huffman codes: bytes before the codes
+        const int CodeBits = 12;        // the longest code
+
+        ushort[][] codeTables;  // (DecodeCodes': each set's codes by their next CodeBits bits)
+        byte[] codedBytes;      // (DecodeCodes': the compressed bytes the codes stand for)
+
+        // Turns a frame packed with Huffman codes (see flashbackHuffman in
+        // Luma3DS-Flashback's flashback_compress.c, and flbDecodeCodes in flb.c)
+        // back into the compressed bytes they stand for, at most 'cap' of them,
+        // into codedBytes; sets 'count'. Returns false if the data is malformed.
+        bool DecodeCodes(byte[] src, int len, int cap, out int count)
+        {
+            count = 0;
+            if (len < CodesHeader || src[1] != 1)
+                return false;
+            uint n = U32(src, 4);
+            if (n > cap)
+                return false;
+            if (codeTables == null)
+            {
+                codeTables = new[] { new ushort[1 << CodeBits], new ushort[1 << CodeBits] };
+                codedBytes = new byte[SlotBytes];
+            }
+
+            // Each set's codes by their next CodeBits bits (first bit lowest): byte
+            // value | code length << 8, or 0 where no code starts. The codes are
+            // canonical: shorter first, and among the same length, lower values first.
+            for (int set = 0; set < 2; set++)
+            {
+                ushort[] table = codeTables[set];
+                int[] perLength = new int[CodeBits + 1], next = new int[CodeBits + 1];
+                int LengthOf(int v) => src[8 + set * 128 + v / 2] >> (v & 1) * 4 & 0xF;
+                for (int v = 0; v < 256; v++)
+                {
+                    if (LengthOf(v) > CodeBits)
+                        return false;
+                    perLength[LengthOf(v)]++;
+                }
+                int code = 0;
+                perLength[0] = 0;
+                for (int length = 1; length <= CodeBits; length++)
+                {
+                    code = (code + perLength[length - 1]) << 1;
+                    next[length] = code;
+                }
+                Array.Clear(table, 0, table.Length);
+                for (int v = 0; v < 256; v++)
+                {
+                    int length = LengthOf(v);
+                    if (length == 0)
+                        continue;
+                    int c = next[length]++, reversed = 0;
+                    if (c >= 1 << length)
+                        return false;   // (more codes than there's room for)
+                    for (int k = 0; k < length; k++)
+                        reversed = reversed << 1 | (c >> k & 1);
+                    for (int k = reversed; k < 1 << CodeBits; k += 1 << length)
+                        table[k] = (ushort)(v | length << 8);
+                }
+            }
+
+            // The bytes, each set's codes in turn: an op byte, then the bytes after
+            // it (LUMA's second, RAW's two).
+            int pos = CodesHeader, have = 0, after = 0;
+            uint bits = 0;
+            for (int i = 0; i < n; i++)
+            {
+                while (have <= 24)
+                {
+                    bits |= (uint)(pos < len ? src[pos] : 0) << have;
+                    pos++;
+                    have += 8;
+                }
+                int e = codeTables[after != 0 ? 1 : 0][bits & ((1 << CodeBits) - 1)], used = e >> 8;
+                if (used == 0)
+                    return false;
+                bits >>= used;
+                have -= used;
+                byte b = (byte)e;
+                codedBytes[i] = b;
+                if (after != 0)
+                    after--;
+                else
+                    after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0;
+            }
+            // (The codes must end in the frame's last 2 bytes: it's padded to 2.)
+            long usedBits = (long)(pos - CodesHeader) * 8 - have, heldBits = (long)(len - CodesHeader) * 8;
+            if (usedBits > heldBits || usedBits + 16 <= heldBits)
+                return false;
+            count = (int)n;
+            return true;
+        }
+
+        // A stored frame (not stored raw), as flbDecompress in flb.c: its ops, or
+        // (if it starts with 0xFF) its ops packed with Huffman codes.
+        bool Decompress(byte[] src, int len, ushort[] dst, int pixels)
+        {
+            if (len != 0 && src[0] == 0xFF)
+                return DecodeCodes(src, len, pixels * 2, out int count) && DecodeOps(codedBytes, count, dst, pixels);
+            return DecodeOps(src, len, dst, pixels);
         }
 
         byte[] stored;      // (DecodeEntry's)

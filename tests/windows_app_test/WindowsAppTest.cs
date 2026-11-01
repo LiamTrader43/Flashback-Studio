@@ -66,6 +66,7 @@ static class WindowsAppTest
         public int Width = 8, Height = 6;
         public int[] Copies;            // each entry's
         public bool Audio, Inputs, Compacted;
+        public bool Codes;              // the version flag: some compressed frames packed with Huffman codes (if they fit)
         public int Frames => Copies.Sum();
         public int Version => Audio ? 3 : Compacted ? 2 : 1;
         // (with sound) the samples the clip holds, where its track starts, and the ring's size
@@ -99,7 +100,110 @@ static class WindowsAppTest
         return o.ToArray();
     }
 
-    // Entry e as stored: every other one compressed.
+    // Code lengths for byte values from their counts (Huffman's algorithm, the
+    // longest cut down to 12 bits as the recorder does): 0 for a value with none.
+    static int[] CodeLengths(long[] counts)
+    {
+        int[] lengths = new int[256];
+        int[] present = Enumerable.Range(0, 256).Where(v => counts[v] > 0).OrderBy(v => counts[v]).ThenBy(v => v).ToArray();
+        if (present.Length == 1)
+            lengths[present[0]] = 1;
+        if (present.Length < 2)
+            return lengths;
+        List<(long Weight, List<int> Values)> nodes = present.Select(v => (counts[v], new List<int> { v })).ToList();
+        while (nodes.Count > 1)
+        {
+            nodes = nodes.OrderBy(n => n.Weight).ToList();
+            (long Weight, List<int> Values) a = nodes[0], b = nodes[1];
+            nodes.RemoveRange(0, 2);
+            foreach (int v in a.Values.Concat(b.Values))
+                lengths[v]++;
+            nodes.Add((a.Weight + b.Weight, a.Values.Concat(b.Values).ToList()));
+        }
+        int[] perLength = new int[13];
+        foreach (int v in present)
+            perLength[Math.Min(lengths[v], 12)]++;
+        long space = Enumerable.Range(1, 12).Sum(n => (long)perLength[n] << (12 - n));
+        for (; space > 1 << 12; space--)
+        {
+            perLength[12]--;
+            for (int n = 11; n > 0; n--)
+                if (perLength[n] != 0)
+                {
+                    perLength[n]--;
+                    perLength[n + 1] += 2;
+                    break;
+                }
+        }
+        int i = 0;
+        for (int n = 12; n > 0; n--)
+            for (int k = perLength[n]; k > 0; k--)
+                lengths[present[i++]] = n;
+        return lengths;
+    }
+
+    // A frame's compressed bytes packed with Huffman codes, as the recorder packs
+    // them (see flashbackHuffman in Luma3DS-Flashback's flashback_compress.c),
+    // with codes from the frame's own counts.
+    static byte[] PackWithCodes(byte[] ops)
+    {
+        long[][] counts = { new long[256], new long[256] };
+        for (int i = 0; i < ops.Length; )
+        {
+            byte b = ops[i++];
+            counts[0][b]++;
+            for (int k = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0; k > 0; k--)
+                counts[1][ops[i++]]++;
+        }
+        List<byte> o = new List<byte> { 0xFF, 1, 0, 0 };
+        o.AddRange(BitConverter.GetBytes(ops.Length));
+        int[][] codes = new int[2][];
+        for (int set = 0; set < 2; set++)
+        {
+            int[] lengths = CodeLengths(counts[set]);
+            for (int v = 0; v < 256; v += 2)
+                o.Add((byte)(lengths[v] | lengths[v + 1] << 4));
+            // canonical codes, each reversed to go out first bit first from the lowest bit
+            codes[set] = new int[256];
+            int[] perLength = new int[13], next = new int[13];
+            foreach (int l in lengths)
+                perLength[l]++;
+            perLength[0] = 0;
+            for (int n = 1, code = 0; n <= 12; n++)
+                next[n] = code = (code + perLength[n - 1]) << 1;
+            for (int v = 0; v < 256; v++)
+            {
+                int n = lengths[v], c = n == 0 ? 0 : next[n]++, reversed = 0;
+                for (int k = 0; k < n; k++)
+                    reversed = reversed << 1 | (c >> k & 1);
+                codes[set][v] = reversed | n << 16;
+            }
+        }
+        ulong bits = 0;
+        int have = 0;
+        void Put(int code)
+        {
+            bits |= (ulong)(code & 0xFFFF) << have;
+            have += code >> 16;
+            for (; have >= 8; have -= 8, bits >>= 8)
+                o.Add((byte)bits);
+        }
+        for (int i = 0; i < ops.Length; )
+        {
+            byte b = ops[i++];
+            Put(codes[0][b]);
+            for (int k = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0; k > 0; k--)
+                Put(codes[1][ops[i++]]);
+        }
+        if (have > 0)
+            o.Add((byte)bits);
+        if (o.Count % 2 == 1)
+            o.Add(0);   // (padded to 2 bytes, as the recorder writes them)
+        return o.ToArray();
+    }
+
+    // Entry e as stored: every other one compressed, and with codes, every
+    // fourth packed with them (where that comes out smaller: big frames).
     static byte[] Stored(Spec s, int e)
     {
         ushort[] px = new ushort[s.Width * s.Height];
@@ -107,6 +211,12 @@ static class WindowsAppTest
             for (int x = 0; x < s.Width; x++)
                 px[y * s.Width + x] = PixelOf(e, x, y);
         byte[] packed = Compress(px);
+        if (s.Codes && e % 4 == 3 && packed.Length < px.Length * 2)
+        {
+            byte[] coded = PackWithCodes(packed);
+            if (coded.Length < packed.Length)
+                return coded;
+        }
         if (e % 2 == 1 && packed.Length < px.Length * 2)
             return packed;
         byte[] raw = new byte[px.Length * 2];
@@ -234,7 +344,7 @@ static class WindowsAppTest
                 Put32(f, 0);
                 Put32(f, 0);
             }
-            foreach (long v in new long[] { 0x4B424C46, s.Version, s.Width, s.Height, Fps, s.Compacted ? 0 : stride,
+            foreach (long v in new long[] { 0x4B424C46, s.Version | (s.Codes ? FlbClip.VersionCodes : 0), s.Width, s.Height, Fps, s.Compacted ? 0 : stride,
                                             slotBytes, entries, s.Frames, indexOffset, inputOffset, 0 })
                 Put32(f, v);
             return indexOffset;
@@ -264,6 +374,8 @@ static class WindowsAppTest
                     Fail($"{what}: {clip.Width}x{clip.Height}, {clip.Fps} fps, {clip.FrameCount} frames");
                 if (clip.HasAudio != s.Audio)
                     Fail($"{what}: sound {(s.Audio ? "missing" : "where there was none")}");
+                if (clip.HasCodes != s.Codes)
+                    Fail($"{what}: the codes' flag {(s.Codes ? "missing" : "where there was none")}");
                 if ((clip.Inputs != null) != inputs)
                     Fail($"{what}: inputs {(inputs ? "missing" : "where there were none")}");
                 else if (inputs && !Enumerable.Range(0, s.Frames).All(i => clip.Inputs[i].Equals(InputOf(i))))
@@ -363,6 +475,7 @@ static class WindowsAppTest
                 Audio = run % 3 != 0,
                 Inputs = run % 4 != 1,
                 Compacted = run % 2 == 1,
+                Codes = run % 7 < 4,
                 Copies = Enumerable.Range(0, 1 + rng.Next(40)).Select(_ => rng.Next(4) == 0 ? 2 + rng.Next(3) : 1).ToArray(),
             };
             if (run % 5 == 4)
@@ -372,7 +485,7 @@ static class WindowsAppTest
             }
             Write("clip.flb", s);
             CheckClip($"version {s.Version}{(s.Compacted ? " compacted" : "")}, {s.Width}x{s.Height}, {s.Frames} frames" +
-                      $"{(s.Audio ? ", sound" : "")}{(s.Inputs ? ", inputs" : "")}", "clip.flb", s, s.Inputs);
+                      $"{(s.Audio ? ", sound" : "")}{(s.Inputs ? ", inputs" : "")}{(s.Codes ? ", codes" : "")}", "clip.flb", s, s.Inputs);
         }
 
         // Damaged clips
@@ -395,6 +508,25 @@ static class WindowsAppTest
         Damaged("an entry shown 0 times", p => Patch32(p, index + 16 + 8, 0), "frame entry 1 is damaged");
         Damaged("frames miscounted", p => Patch32(p, -16, d.Frames + 1), "the clip's frame count doesn't match its index");
         Damaged("a frame's data cut short", p => Patch32(p, index + 16 + 4, Stored(d, 1).Length - 1), "frame 1 is damaged");
+        Damaged("the codes' flag and a newer one", p => Patch32(p, -44, 3 | 0x300),
+                "made by a newer Flashback version; get the latest Flashback Studio");
+
+        // A frame packed with codes, damaged (its format, or its count of bytes)
+        Spec dc = new Spec { Width = 400, Height = 240, Audio = true, Codes = true, Copies = new[] { 1, 2, 1, 1 } };
+        long codedIndex = Write("good_codes.flb", dc);
+        CheckClip("a frame packed with codes", "good_codes.flb", dc, false);
+        byte[] good = File.ReadAllBytes("good_codes.flb");
+        int coded = (int)BitConverter.ToUInt32(good, (int)codedIndex + 3 * 16);    // (entry 3's offset)
+        if (good[coded] != 0xFF)
+            Fail("entry 3 of a clip with codes isn't packed with them");
+        foreach ((string what, long offset, long value) in new[] {
+            ("the wrong format", (long)coded, 0xFF | 2L << 8),
+            ("a byte too many", coded + 4L, BitConverter.ToUInt32(good, coded + 4) + 1L) })
+        {
+            File.Copy("good_codes.flb", "bad.flb", true);
+            Patch32("bad.flb", offset, value);
+            CheckFails("a frame packed with codes, " + what, "bad.flb", "frame 3 is damaged");
+        }
 
         // Damaged inputs: the clip still reads, without them
         long inputs = index - 16 - d.Frames * 16;
@@ -472,6 +604,7 @@ static class WindowsAppTest
             {
                 Audio = run % 3 != 0,
                 Inputs = run % 4 != 1,
+                Codes = run % 5 < 3,
                 Copies = Enumerable.Range(0, 1 + rng.Next(30)).Select(_ => rng.Next(4) == 0 ? 2 + rng.Next(3) : 1).ToArray(),
             };
             if (run % 6 == 5)
@@ -479,7 +612,8 @@ static class WindowsAppTest
                 s.Width = 400;
                 s.Height = 240;
             }
-            string what = $"version {s.Version}, {s.Width}x{s.Height}, {s.Frames} frames{(s.Audio ? ", sound" : "")}{(s.Inputs ? ", inputs" : "")}";
+            string what = $"version {s.Version}, {s.Width}x{s.Height}, {s.Frames} frames{(s.Audio ? ", sound" : "")}" +
+                          $"{(s.Inputs ? ", inputs" : "")}{(s.Codes ? ", codes" : "")}";
             Write("orig.flb", s);
             File.Copy("orig.flb", "mine.flb", true);
             File.Copy("orig.flb", "theirs.flb", true);
@@ -741,7 +875,7 @@ static class WindowsAppTest
 
     static void TestConversions(string ffmpeg)
     {
-        Spec s = new Spec { Width = 400, Height = 240, Audio = true, Inputs = true, Copies = new[] { 1, 3, 1, 2, 1, 1, 4, 1 } };
+        Spec s = new Spec { Width = 400, Height = 240, Audio = true, Inputs = true, Codes = true, Copies = new[] { 1, 3, 1, 2, 1, 1, 4, 1 } };
         Write("big.flb", s);
         CheckConversion("recorded, with sound and inputs", ffmpeg, "big.flb", s, true);
         CheckConversion("without the input display", ffmpeg, "big.flb", s, false);      // (and replacing the MP4)

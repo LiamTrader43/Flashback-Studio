@@ -120,7 +120,8 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
         return false;
     }
     memset(info, 0, sizeof(*info));
-    info->version = flbU32(t + 4);
+    info->version = flbU32(t + 4) & ~FLB_VERSION_CODES;
+    info->hasCodes = (flbU32(t + 4) & FLB_VERSION_CODES) != 0;
     if (info->version < FLB_VERSION_RECORDED || info->version > FLB_VERSION_AUDIO)
     {
         *error = "made by a newer Flashback version; get the latest Flashback Studio";
@@ -303,6 +304,7 @@ void flbClose(FlbClip *clip)
     free(clip->entries);
     free(clip->stored);
     free(clip->inputs);
+    free(clip->codes);
     memset(clip, 0, sizeof(*clip));
 }
 
@@ -344,9 +346,20 @@ bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **e
         *error = "the file couldn't be read";
         return false;
     }
-    if (raw && buf != (uint8_t *)dst)
-        memcpy(dst, buf + skip, e->size);
-    else if (!raw && !flbDecompress(buf + skip, e->size, dst, info->width * info->height))
+    if (raw)
+    {
+        if (buf != (uint8_t *)dst)
+            memcpy(dst, buf + skip, e->size);
+        return true;
+    }
+    // (Frames packed with Huffman codes are decoded through the clip's
+    // FlbCodes, made for the first one.)
+    if (buf[skip] == 0xFF && clip->codes == NULL && (clip->codes = malloc(sizeof(FlbCodes))) == NULL)
+    {
+        *error = "not enough memory for this clip";
+        return false;
+    }
+    if (!flbDecompress(buf + skip, e->size, dst, info->width * info->height, clip->codes))
     {
         snprintf(g_error, sizeof(g_error), "frame %lu is damaged", (unsigned long)entry);
         *error = g_error;
@@ -643,7 +656,7 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     uint8_t *t = index + indexSize;
     memset(t, 0, FLB_TRAILER_SIZE);
     flbPut32(t, FLB_MAGIC);
-    flbPut32(t + 4, info->hasAudio ? FLB_VERSION_AUDIO : FLB_VERSION_COMPACT);
+    flbPut32(t + 4, (info->hasAudio ? FLB_VERSION_AUDIO : FLB_VERSION_COMPACT) | (info->hasCodes ? FLB_VERSION_CODES : 0));
     flbPut32(t + 8, info->width);
     flbPut32(t + 12, info->height);
     flbPut32(t + 16, info->fps);
@@ -794,9 +807,9 @@ bool flbCleanUpLeftover(const char *path)
     return true;
 }
 
-// Decodes the recorder's frame compression (see flashbackCompress in
+// Decodes the recorder's frame compression, its ops (see flashbackCompress in
 // Luma3DS-Flashback's flashback_compress.c).
-bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels)
+static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels)
 {
     uint16_t index[64];
     memset(index, 0, sizeof(index));
@@ -859,4 +872,97 @@ bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pix
         dst[i++] = px;
     }
     return p == end;
+}
+
+#define FLB_CODES_HEADER    264     // a frame packed with Huffman codes: bytes before the codes
+
+// Turns a frame packed with Huffman codes (see flashbackHuffman in
+// Luma3DS-Flashback's flashback_compress.c) back into the compressed bytes they
+// stand for, at most 'cap' of them, into codes->bytes; sets *count.
+static bool flbDecodeCodes(const uint8_t *src, uint32_t len, FlbCodes *codes, uint32_t cap, uint32_t *count)
+{
+    if (len < FLB_CODES_HEADER || src[1] != 1)
+        return false;
+    uint32_t n = flbU32(src + 4);
+    if (n > cap || n > sizeof(codes->bytes))
+        return false;
+
+    // Each set's codes by their next FLB_CODE_BITS bits (first bit lowest). The
+    // codes are canonical: shorter first, and among the same length, lower
+    // byte values first.
+    for (uint32_t set = 0; set < 2; set++)
+    {
+        const uint8_t *lengths = src + 8 + set * 128;
+        uint16_t *table = codes->table[set];
+        uint32_t perLength[FLB_CODE_BITS + 1] = { 0 }, next[FLB_CODE_BITS + 1];
+        for (uint32_t v = 0; v < 256; v++)
+        {
+            uint32_t length = lengths[v / 2] >> (v & 1) * 4 & 0xF;
+            if (length > FLB_CODE_BITS)
+                return false;
+            perLength[length]++;
+        }
+        uint32_t code = 0;
+        perLength[0] = 0;
+        for (uint32_t length = 1; length <= FLB_CODE_BITS; length++)
+        {
+            code = (code + perLength[length - 1]) << 1;
+            next[length] = code;
+        }
+        memset(table, 0, sizeof(codes->table[set]));
+        for (uint32_t v = 0; v < 256; v++)
+        {
+            uint32_t length = lengths[v / 2] >> (v & 1) * 4 & 0xF;
+            if (length == 0)
+                continue;
+            uint32_t c = next[length]++, reversed = 0;
+            if (c >= 1u << length)
+                return false;   // (more codes than there's room for)
+            for (uint32_t k = 0; k < length; k++)
+                reversed = reversed << 1 | (c >> k & 1);
+            for (uint32_t k = reversed; k < 1u << FLB_CODE_BITS; k += 1u << length)
+                table[k] = (uint16_t)(v | length << 8);
+        }
+    }
+
+    // The bytes, each set's codes in turn: an op byte, then the bytes after it
+    // (LUMA's second, RAW's two).
+    uint32_t pos = FLB_CODES_HEADER, bits = 0, have = 0, after = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        while (have <= 24)
+        {
+            bits |= (uint32_t)(pos < len ? src[pos] : 0) << have;
+            pos++;
+            have += 8;
+        }
+        uint32_t e = codes->table[after != 0][bits & ((1u << FLB_CODE_BITS) - 1)], used = e >> 8;
+        if (used == 0)
+            return false;
+        bits >>= used;
+        have -= used;
+        uint8_t b = (uint8_t)e;
+        codes->bytes[i] = b;
+        if (after != 0)
+            after--;
+        else
+            after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0;
+    }
+    // (The codes must end in the frame's last 2 bytes: it's padded to 2.)
+    uint64_t used = (uint64_t)(pos - FLB_CODES_HEADER) * 8 - have, held = (uint64_t)(len - FLB_CODES_HEADER) * 8;
+    if (used > held || used + 16 <= held)
+        return false;
+    *count = n;
+    return true;
+}
+
+bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels, FlbCodes *codes)
+{
+    if (len != 0 && src[0] == 0xFF)
+    {
+        uint32_t count;
+        return codes != NULL && flbDecodeCodes(src, len, codes, pixels * 2, &count) &&
+               flbDecodeOps(codes->bytes, count, dst, pixels);
+    }
+    return flbDecodeOps(src, len, dst, pixels);
 }

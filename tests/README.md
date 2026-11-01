@@ -41,6 +41,22 @@ resolution is (up to 3.6 GB): its frames, inputs and index are all past 2 GB.
 It's a sparse file, so the gap before the frames takes no room on the disk. On
 Windows, if the drive can't hold sparse files (FAT32 or exFAT), it's left out.
 
+## Huffman codes test
+
+`codes_test.c` checks `flb.c`'s decoding of frames packed with Huffman codes,
+as a New 3DS records them. It makes its frames with a copy of the recorder's
+own compression (from Luma3DS-Flashback's `flashback_compress.c`), so keep that
+copy in step with the recorder:
+- frames of several kinds, at both resolutions, are packed one after another,
+  as recording does (each frame's codes come from the counts of the frame
+  before), and every one must decode to exactly the frame;
+- damaged packed frames (cut short, the wrong format, too many or too few
+  bytes, codes that don't fit, a code too long) must fail, and with bits
+  flipped at random, decoding must never write past the frame;
+- clips with packed frames, as the recorder saves them (with the version flag,
+  with and without sound), must open and play, and keep the flag and every
+  frame when compacted and trimmed.
+
 ## Read-ahead test
 
 The runner copies the "Reading ahead" section, unchanged, into
@@ -78,12 +94,14 @@ them:
 - with and without sound;
 - with and without inputs;
 - with copies of missed frames;
-- with some frames compressed, and some stored as they are.
+- with some frames compressed, and some stored as they are;
+- with the version flag for Huffman codes, and at full resolution, some frames
+  packed with them.
 
 Every frame, input and sound sample must read back as written, and so must the
 sound of part of a clip. Clips from older builds (`.raw` and `.txt`) are read
-too. Damaged clips must fail with the right message, and a clip with damaged
-inputs must still read, without them.
+too. Damaged clips must fail with the right message (a damaged packed frame
+too), and a clip with damaged inputs must still read, without them.
 
 Compacting and trimming are checked against the 3DS app's: `compact_ref.c` does
 them with `flb.c`. The test compacts clips like those, and trims them (from the
