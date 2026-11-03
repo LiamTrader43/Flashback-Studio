@@ -1,0 +1,179 @@
+# Flashback Studio user guide
+
+Everything about using Flashback Studio, in detail. To install it, see the [README](../README.md).
+
+## Flashback Studio for Windows
+
+The 3DS app on a PC, with its two screens side by side: the top screen (left) shows the selected clip, or the clip playing, and the bottom screen (right) has the clip grid, or the player's controls. It plays clips with their sound and their inputs, trims, compacts, renames and deletes them like the 3DS app does, and exports them as MP4 videos.
+
+### What you need
+
+* **Windows 10 or 11.** The app uses .NET Framework 4.8, which comes with them. There's no macOS or Linux version yet.
+* That's all: it comes with [ffmpeg](https://ffmpeg.org), which does the video encoding when you export.
+
+### Starting it
+
+1. Download `FlashbackStudio-Windows.zip` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest), and extract it anywhere. Keep `ffmpeg.exe` next to `FlashbackStudio.exe`.
+2. Copy your clips from the 3DS SD card (they're in `/luma/flashback/`, named `clip_<date>.flb`) to your PC, or put the SD card in your PC.
+3. Open `FlashbackStudio.exe`.
+
+It opens the folder you used last, or the first time, the SD card's `/luma/flashback/` if it's in the PC. To open another folder, click **Open folder**, or drag the folder (or a clip in it) onto the window, or onto `FlashbackStudio.exe`. It also remembers the window's size and place.
+
+### Using it
+
+It works like the 3DS app (see [Watching clips on the 3DS](#watching-clips-on-the-3ds)), with the mouse instead of the 3DS's buttons and touch screen: the bottom screen has a button for everything. Click a clip to select it, and click it again to play it.
+
+The clip list's buttons: **Play**, **Trim**, **Export** (an MP4, see below), **Compact** (asks first), **Rename** (spaces become dashes; names Windows can't use are refused), **Delete** (asks first: it goes to the Recycle Bin, or on an SD card, is deleted for good), **Refresh** (reads the folder again), **Export all** and **Open folder**. The mouse wheel scrolls the grid.
+
+The player has a media player's buttons: a second back, a frame back, play/pause, a frame forward and a second forward. Those also have keys (written under them):
+
+| Key | |
+|---|---|
+| Space (or click the picture) | Play/pause |
+| , / . | Previous/next frame (pauses; hold to repeat) |
+| Left/Right | Back/forward 1 second |
+
+Under them, the speed (1/4x, 1/2x, 1x, 2x), and buttons for the **Settings** (Loop, Input display, Timing details), **Trim**, **Export as MP4** and **Back to the clip list**. Click or drag along the bar to jump there. The volume slider sets the player's volume (exported MP4s have the sound as recorded); it's remembered for next time. Hold the mouse over a button to see what it does, at the bottom of the screen.
+
+While trimming, the same keys work, and the buttons set the **Start here** and **End here** of the selection, **Save as a new clip** (asks first), turn the **Loop** on and off, **Export the selection** as an MP4, or **Stop trimming**.
+
+Trimmed clips are saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), compacted, like the 3DS app saves them. Compacting and trimming do exactly what they do on the 3DS, and write exactly the same clips, and renaming follows the same rules, so clips can go back and forth between the two. **Cancel** stops compacting or trimming at any time, and leaves the clip as it was.
+
+### Exporting MP4s
+
+**Export** exports the selected clip (or, while trimming, the selection), and **Export all** every clip in the folder. Each MP4 is H.264 video at the size you choose (see **Size** and **Scaling** below), encoded by the CPU or an NVIDIA graphics card (**Encoder**), at the frame rate it was recorded at, with the game's sound as an AAC track if the clip was recorded with audio. It plays in any video player and imports into video editors like DaVinci Resolve.
+
+Before it starts, it asks:
+
+* **Name** (exporting one clip or a selection): type the MP4's name. It starts as the clip's (`clip_<date>`, or `<name>-trim` for a selection). If there's already an MP4 with that name in the folder, it says it will be replaced.
+* **Folder:** where the MP4s go. To start with, that's next to the clips. **Change…** picks another folder, which is remembered for next time, and **Reset** goes back to next to the clips.
+* **Size** (a dropdown): **800x480** to start with, twice the clip's size (400x240 for a half resolution clip), or **1080p** (1800x1080), **1440p** (2400x1440) or **4K** (3600x2160), keeping the 3DS screen's shape.
+* **Scaling** (a dropdown): how the picture is scaled up to that size, with ffmpeg's scaler. **Nearest** (to start with) keeps sharp, unblurred pixels, as exports always had (at 1080p, which isn't a whole number of times the 3DS screen, some pixels come out a little wider than others). **Bilinear**, **bicubic**, **lanczos** and **spline** smooth them instead, from the softest (bilinear) to the sharpest (lanczos and spline). Either way, the input display is drawn after the scaling, so it stays sharp. Bigger sizes take longer: on a 12-core PC, a 20-second clip takes about 2 seconds at 800x480, 7 at 1080p, 13 at 1440p and 31 at 4K with the CPU (with the GPU: 1, 4, 7 and 20). The size and scaling are remembered for next time.
+* **Encoder** (a dropdown): what encodes the video. The **CPU** (x264, to start with), or the **GPU**: an NVIDIA graphics card's video encoder (NVENC), which gives the same picture quality in less time (see above), in files a third to a half bigger. On a PC without an NVIDIA card (or its driver), only the CPU can be chosen. It's remembered for next time.
+* **Input display** (click **on**/**off** to change it; on to start with): clips recorded with their inputs show them in the video's bottom-left corner, just as the player shows them. Off, the video is just the game.
+* **Exporting every clip:** each MP4 is named after its clip. Clips that already have an MP4 in the folder are skipped, so it's safe to export the same folder again. Click **skip** to make it **replace** their MP4s instead (to export them again with the input display switched off, for example).
+
+When it's done, **Show in folder** (under the message) opens File Explorer at the MP4, or at the folder of them. **Cancel** stops exporting: the clip being exported keeps the MP4 it had, if any, and the ones already done keep their new ones. Clips saved by older Flashback builds (a `.raw` file with a `.txt` next to it) play and export too, but can't be trimmed, compacted or renamed.
+
+### If something goes wrong
+
+The bottom screen says what went wrong, under the selected clip's details.
+
+| Message | What to do |
+|---|---|
+| `Exporting needs ffmpeg.exe next to FlashbackStudio.exe` | Extract the whole zip, and keep `ffmpeg.exe` next to `FlashbackStudio.exe`. Opening the app straight from the zip, without extracting it, leaves ffmpeg behind. |
+| Windows says "Windows protected your PC" | The app isn't signed, so Windows doesn't know it. Click **More info**, then **Run anyway**. |
+| `Not a Flashback clip (or the copy is incomplete)`, `Not a Flashback clip (file too small)` or `The file ends early` | The file was cut off, usually by removing the SD card or stopping the copy too early, or it isn't a Flashback clip. Copy the clip from the SD card again. |
+| `Made by a newer Flashback version` | Download Flashback Studio from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest). |
+| `... is damaged` or `The clip's frame count doesn't match its index` | The clip file is corrupted. Copy it from the SD card again; if that doesn't help, the recording itself was damaged. |
+| `ffmpeg failed: ...` | ffmpeg's own message follows. The most common cause is a full disk. |
+| `Its .txt is missing` / `Couldn't read the resolution or frame rate from its .txt` | Only for older `.raw` clips: copy the `.txt` with the same name from the SD card next to the `.raw`. |
+| `No sound: the sound output couldn't be opened` | Windows has no sound output (or it's in use by another app in exclusive mode). The clip plays without sound. |
+
+## Watching clips on the 3DS
+
+Flashback Studio is a homebrew app that lists the clips on your SD card and plays them on the top screen, right on the console.
+
+### Installing it
+
+It comes two ways; use either (or both: they're separate apps).
+
+**As a `.3dsx`, from the Homebrew Launcher:**
+
+1. Download `FlashbackStudio.3dsx` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) (or build it yourself, see below).
+2. Copy it to the `/3ds/` folder on your SD card.
+3. Start it from the Homebrew Launcher.
+
+**As a `.cia`, on the HOME Menu:**
+
+1. Download `FlashbackStudio.cia` from the [latest release](https://github.com/LiamTrader43/Flashback-Studio/releases/latest) (or build it yourself, see below).
+2. Copy it to your SD card and install it with [FBI](https://github.com/Steveice10/FBI).
+3. Start it from the HOME Menu, like any other app.
+
+### Using it
+
+The bottom screen shows the clips in `/luma/flashback/` as a grid, newest first: each one's first frame, with the time it was saved and its length under it. The selected clip's first frame shows full size on the top screen, and its resolution, frame rate, size, whether it has sound, and number of missed frames below the grid. Half resolution clips are shown at twice their size, so they fill the screen.
+
+| Clip list | |
+|---|---|
+| D-Pad | Select a clip |
+| Touch a clip | Select it (touch it again to play it) |
+| A | Play the clip |
+| X | Delete the clip (asks first) |
+| R | Compact the clip (asks first; see below) |
+| L | Rename the clip, with the 3DS keyboard (spaces become dashes; names a file can't have, or Windows can't copy, are refused) |
+| SELECT | Trim the clip (see below) |
+| Y | Refresh the list |
+| START | Exit |
+
+| Playing a clip | |
+|---|---|
+| A | Play/pause |
+| Left/Right | Previous/next frame (pauses; hold to repeat) |
+| L/R | Back/forward 1 second |
+| Up/Down | Speed: 1/4x, 1/2x, 1x, 2x |
+| X | Settings (see below) |
+| Touch the bar | Jump to that point |
+| SELECT | Trim (see below) |
+| B | Back to the clip list |
+
+X opens the player's settings on the bottom screen, while the clip carries on playing. Choose one with Up/Down, change it with A (or Left/Right), and close them with X or B. They stay as you left them until you exit the app.
+
+| Setting | |
+|---|---|
+| Loop | Play the clip again from the start when it ends |
+| Input display | Show what was pressed (see below) |
+| Timing details | How long each frame takes to read and draw, and how close the sound is to the picture |
+
+**Input display.** Clips recorded since Flashback records the inputs show them in the top screen's bottom-left corner, over the picture. It shows the buttons held during each frame filled in (a quick tap shows too), where the Circle Pad was, and where the touch screen was touched. Clips recorded before then have no inputs to show.
+
+Red marks under the progress bar show where the recorder missed frames (they're filled with copies of the frame before, so the clip plays at the right speed). On a missed frame, the player says so.
+
+Clips recorded with audio play their sound at normal speed. It's muted while paused, while stepping through frames, while you touch the bar, and at the other speeds. The player shows which, below the time. The sound needs the DSP firmware dump `/3ds/dspfirm.cdc` on the SD card, like every homebrew app with sound. If you've used one before, you have it; otherwise make it with [DSP1](https://github.com/zoogie/DSP1). Without it, clips play silently.
+
+While a clip plays, the app reads and decodes the next few frames ahead of time, so a slow moment reading the SD card doesn't hold up the picture.
+
+**If playback stutters,** check that Flashback recording is off (Rosalina menu > Flashback recorder). While it's on, it records the app too, and its SD card writes compete with the app reading the clip. Timing details (in the settings, X) shows how long each frame takes to read and draw, and how many frames were skipped to keep up.
+
+### Trimming clips
+
+Trimming saves part of a clip as a new clip, with its sound and inputs; the original is kept. Press SELECT in the clip list (or while a clip plays), find where the part you want starts and press L, then where it ends and press R. The part that will be cut off is darkened on the bar, and the selection plays (and loops) on its own so you can check it. Press X to save it.
+
+| Trimming | |
+|---|---|
+| L / R | Start / end the selection at this frame |
+| A | Play/pause the selection |
+| Left/Right | Previous/next frame |
+| Up/Down | Forward/back 1 second |
+| X | Save the selection as a new clip (asks first) |
+| Y | Loop on/off |
+| Touch the bar | Jump to that point |
+| B or SELECT | Stop trimming |
+
+The new clip is saved next to the original as `<name>-trim.flb` (or `-trim2`, and so on), already compacted, and selected in the list when it's done. Like compacting, it needs free space for the new clip, B cancels it, and nothing is left behind if it fails.
+
+### Compacting clips
+
+A clip is as big as the uncompressed footage (at full resolution with sound, about 362 MB for 60 seconds, 724 MB for 2 minutes and 3.6 GB for 10 minutes), even though its frames are compressed: Flashback saves its recording buffer as-is so saving is instant, and that buffer has room for every frame uncompressed. Compacting rewrites the clip with just its frame data, typically to about half the size (one such clip became 159 MB). The video is exactly the same, but the clip copies to a PC faster (most noticeable over Wi-Fi) and takes less space.
+
+Select a clip and press R. The details under the list show how big it will be. Compacting a 60-second clip takes about 20 seconds (a 2-minute one about twice as long), and B cancels it at any time. When it's done, the app shows the clip's new size and how long compacting took.
+
+* **It needs free space** for the compacted copy (the app checks first): the copy is written next to the clip and only replaces it once it's complete and reads back correctly.
+* **The clip is never at risk:** if compacting fails, is cancelled, or the console turns off part way, the clip is left as it was (the app tidies up any leftover files the next time it starts).
+* **Compacted clips** play in the app and export with Flashback Studio for Windows like any other clip, sound and inputs included (only the sound the clip's frames last is kept).
+
+## Building
+
+### The Windows app
+
+The Windows app is in [`windows-app/`](../windows-app): a Windows Forms app for .NET Framework 4.8. Build it on Windows with the [.NET SDK](https://dotnet.microsoft.com/download): `dotnet build windows-app -c Release` builds `windows-app/bin/Release/net48/FlashbackStudio.exe`. To export with it, put `ffmpeg.exe` next to it, or have ffmpeg on your PATH.
+
+### The 3DS app
+
+Install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the 3DS tools (devkitARM and libctru), then run `make` in the `3ds-app` folder. It builds `FlashbackStudio.3dsx`.
+
+`make cia` builds `FlashbackStudio.cia` too. It also needs [bannertool](https://github.com/carstene1ns/3ds-bannertool), which devkitPro doesn't include: put `bannertool` in devkitPro's `tools/bin` folder (next to `makerom`), or run `make cia BANNERTOOL=<path to bannertool>`.
+
+The clip reader (`3ds-app/source/flb.c`) is plain C, so it also builds on a PC.
+
+[`tests/`](../tests) has PC tests that run the app's own code (the clip reader and compactor, and the player's read-ahead) and the Windows app's. Run them with `python tests/run_tests.py` (see [tests/README.md](../tests/README.md) for what you need).
