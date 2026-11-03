@@ -297,7 +297,7 @@ namespace FlashbackStudio
             }
             int t = index + indexSize;
             Put32(tail, t, Magic);
-            Put32(tail, t + 4, (clip.HasAudio ? 3 : 2) | (clip.HasCodes ? FlbClip.VersionCodes : 0));
+            Put32(tail, t + 4, (clip.HasAudio ? 3u : 2u) | (clip.HasCodes ? FlbClip.VersionCodes : 0u));
             Put32(tail, t + 8, clip.Width);
             Put32(tail, t + 12, clip.Height);
             Put32(tail, t + 16, clip.Fps);
