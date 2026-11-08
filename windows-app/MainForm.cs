@@ -55,6 +55,7 @@ namespace FlashbackStudio
         Player player;
         bool loop = true, showInputs = true, showStats;
         int volume = 100;               // playback's (0 to 100; exports are as recorded), remembered
+        InputLayout inputLayout = InputLayout.Default;  // where the input display goes, how big, its colour (exports' too), remembered
         bool askSave;                   // asking whether to save the selection
         long panelShown;                // when the player's bottom screen was last drawn (Stopwatch ticks)
         bool fineTimer;                 // timeBeginPeriod(1) is on
@@ -133,6 +134,12 @@ namespace FlashbackStudio
                     PlayerChanged();
                 }
             };
+            top.InputsMoved += () =>
+            {
+                inputLayout = top.InputsAt;
+                SaveSettings();
+                bottom.Invalidate();
+            };
             timer.Tick += (s, e) => Tick();
             previewTimer.Tick += (s, e) =>
             {
@@ -198,6 +205,7 @@ namespace FlashbackStudio
         {
             base.OnLoad(e);
             LoadSettings(out string last, out Rectangle? window, out bool maximized);
+            top.InputsAt = inputLayout;
             // Where the window was, if that's still on a screen (most of its title bar, at least).
             if (window.HasValue && Screen.AllScreens.Any(screen =>
                     Rectangle.Intersect(screen.WorkingArea, new Rectangle(window.Value.X, window.Value.Y, window.Value.Width, S(30))).Width >= S(100)))
@@ -215,7 +223,7 @@ namespace FlashbackStudio
         }
 
         // ---- What's remembered: the folder opened last, the volume, where exports go, their size,
-        // scaling and encoder, and the window
+        // scaling and encoder, the input display's place, size and colour, and the window
 
         static string SettingsFile =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlashbackStudio", "settings.txt");
@@ -246,6 +254,8 @@ namespace FlashbackStudio
                     else if (name == "encoder" && Enum.TryParse(value, out ExportEncoder encoder) &&
                              Enum.IsDefined(typeof(ExportEncoder), encoder))
                         exportEncoder = encoder;
+                    else if (name == "inputs" && InputLayout.TryParse(value, out InputLayout layout))
+                        inputLayout = layout;
                     else if (name == "window")
                     {
                         // x, y, width, height, and 1 if it was maximized
@@ -272,6 +282,7 @@ namespace FlashbackStudio
                 Rectangle w = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
                 File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder,
                                                          "size=" + exportSize, "scaling=" + exportScaling, "encoder=" + exportEncoder,
+                                                         "inputs=" + inputLayout,
                                                          $"window={w.X},{w.Y},{w.Width},{w.Height},{(WindowState == FormWindowState.Maximized ? 1 : 0)}" });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -1163,7 +1174,7 @@ namespace FlashbackStudio
         void Export()
         {
             string ffmpeg = Converter.FindFfmpeg();
-            bool inputs = exportInputs;
+            InputLayout? inputs = exportInputs ? inputLayout : (InputLayout?)null;     // (as the player shows it)
             ExportSize size = exportSize;
             ExportScaling scaling = exportScaling;
             // (The GPU if it can encode here: if that isn't known yet, the job finds out first.)
@@ -1390,6 +1401,7 @@ namespace FlashbackStudio
             showStats = player.ShowStats;
             player.Dispose();
             player = null;
+            top.Editing = false;
             timer.Stop();
             if (fineTimer)
                 timeEndPeriod(1);
@@ -1411,15 +1423,40 @@ namespace FlashbackStudio
                 player.ShowStats = !player.ShowStats;
         }
 
+        // Whether the player shows the input display (it's on, and the clip has inputs).
+        bool InputsShown => player != null && player.ShowInputs && player.Clip.Inputs != null;
+
         // Shows the player's frame on the top screen, with the input display (if
-        // it's on and the clip has inputs).
+        // it's shown: while the settings are open, it can be moved and resized).
         void ShowFrame()
         {
             FlbClip clip = player.Clip;
+            top.Editing = player.SettingsOpen && InputsShown;
             if (player.ShownEntry < 0)
                 return;
-            FlbInput? input = player.ShowInputs && clip.Inputs != null ? clip.Inputs[player.Frame] : (FlbInput?)null;
+            FlbInput? input = InputsShown ? clip.Inputs[player.Frame] : (FlbInput?)null;
             player.DrawMs = top.Show(player.Pixels, clip.Width, clip.Height, input);
+        }
+
+        // The input display's colour, chosen in Windows' colour picker.
+        void ChooseInputColor()
+        {
+            using (ColorDialog d = new ColorDialog { Color = Color.FromArgb(255, Color.FromArgb(inputLayout.Color)), FullOpen = true })
+            {
+                if (d.ShowDialog(this) != DialogResult.OK)
+                    return;
+                inputLayout.Color = d.Color.ToArgb() & 0xFFFFFF;
+            }
+            top.InputsAt = inputLayout;
+            SaveSettings();
+        }
+
+        // The input display back where it starts, as big, and its colour.
+        void ResetInputLayout()
+        {
+            inputLayout = InputLayout.Default;
+            top.InputsAt = inputLayout;
+            SaveSettings();
         }
 
         // After a key or a click: both screens up to date now.
@@ -1686,7 +1723,15 @@ namespace FlashbackStudio
                     y += S(28) + S(4);
                 }
                 y += gap;
-                p.Button(p.Split(p.Band(y, S(28)), 3, gap)[0], "Close", WithPlayer(() => player.SettingsOpen = false));
+                // The input display's colour, and putting it back as it started, while
+                // it's shown. (It's moved and resized by dragging it on the picture.)
+                Rectangle[] a = p.Split(p.Band(y, S(28)), 3, gap);
+                bool shown = InputsShown;
+                p.Button(a[0], "Color…", shown ? WithPlayer(ChooseInputColor) : null, tip: "Choose the input display's color");
+                p.Button(a[1], "Reset", shown ? WithPlayer(ResetInputLayout) : null, tip: "Put the input display back as it started");
+                p.Button(a[2], "Close", WithPlayer(() => player.SettingsOpen = false));
+                if (shown && p.Tip == null)
+                    p.Tip = "Drag the input display to move or resize it.";
             }
             else
             {

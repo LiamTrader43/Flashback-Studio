@@ -141,23 +141,24 @@ namespace FlashbackStudio
         }
 
         // Exports 'clip' as the MP4 'mp4', replacing it if it exists, with ffmpeg
-        // at 'ffmpeg'. 'progress' is told how many frames are done, now and then.
-        // Throws OperationCanceledException if 'cancel' stops it, or another
-        // exception saying what went wrong; either way, an MP4 that was there is
-        // left as it was, and nothing else is left behind.
-        public static void ToMp4(FlbClip clip, string mp4, bool showInputs, ExportSize size, ExportScaling scaling,
+        // at 'ffmpeg', with the input display where 'inputs' says (if it isn't
+        // null, and the clip has inputs). 'progress' is told how many frames are
+        // done, now and then. Throws OperationCanceledException if 'cancel' stops
+        // it, or another exception saying what went wrong; either way, an MP4
+        // that was there is left as it was, and nothing else is left behind.
+        public static void ToMp4(FlbClip clip, string mp4, InputLayout? inputs, ExportSize size, ExportScaling scaling,
                                  ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
-            ToMp4(clip, 0, clip.FrameCount, mp4, showInputs, size, scaling, encoder, ffmpeg, progress, cancel);
+            ToMp4(clip, 0, clip.FrameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel);
 
         // The same, for frames firstFrame .. firstFrame + frameCount - 1 of it
         // (a trimmed part), with their sound.
-        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, bool showInputs,
+        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
                                  Action<int> progress, CancellationToken cancel)
         {
             (int w, int h) = VideoSize(clip.Width, clip.Height, size);
             bool here = size == ExportSize.Double && scaling == ExportScaling.Nearest;     // (each pixel 2 x 2, here)
-            InputOverlay overlay = showInputs && clip.Inputs != null ? new InputOverlay(w, h) : null;
+            InputOverlay overlay = inputs.HasValue && clip.Inputs != null ? new InputOverlay(w, h, inputs.Value) : null;
             string part = mp4 + ".part";     // the MP4, until it's finished
             string wav = null;
             Process p = null, scaler = null;

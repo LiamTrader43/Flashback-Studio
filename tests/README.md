@@ -115,12 +115,22 @@ main.c's drawing code (from `// The input display:` to the end of
 `overlay_ref.c` includes. For many inputs, the Windows app's display must match
 the 3DS app's, but for the rounding of the 3DS's 16-bit colours.
 
+The Windows app's display can also be moved, resized and given another colour
+(by dragging it in the player). Moved and resized, it must draw exactly what it
+draws where it starts on a frame as much bigger, and in a colour, each channel
+exactly as it is in that much grey. Anywhere and at any size, it must stay on
+the screen and on the frame; dragging it must too, and resizing it by a corner
+must leave the opposite corner where it was. Its line in `settings.txt` must
+read back as it was written, whatever the PC's language, and nonsense mustn't
+be read.
+
 So a change to `flb.c`'s compacting or to the input display needs the same
 change in the Windows app.
 
 With ffmpeg on the PATH, it also exports clips with sound and inputs, without
 them, and a trimmed part, at twice their size with sharp pixels (scaled by the
-app), and at other sizes and scalings (scaled by a second ffmpeg). Every frame
+app), and at other sizes and scalings (scaled by a second ffmpeg), some with
+the input display moved, resized and in another colour. Every frame
 of the MP4 must show the right picture (for ffmpeg's scaling, the picture as
 ffmpeg scales it on its own, with its colour at half the size, as H.264 keeps
 it), with the input display if asked, and the sound must last as long as the

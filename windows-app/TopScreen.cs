@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -7,7 +8,10 @@ namespace FlashbackStudio
 {
     // The "top screen": a clip's frame, at the biggest whole number of times the
     // 3DS's 400 x 240 that fits (so its pixels stay sharp and even), in the
-    // middle of black, with the input display over it if asked.
+    // middle of black, with the input display over it if asked, where its
+    // InputsAt says. While it's Editing (the player's settings are open), the
+    // input display has a frame around it, and can be dragged to move it, or by
+    // a corner to resize it.
     sealed class TopScreen : Control
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -28,6 +32,15 @@ namespace FlashbackStudio
         byte[] bgr;                 // it, drawn at 'scale'
         int scale, bgrW, bgrH;
         InputOverlay overlay;
+        InputLayout layout = InputLayout.Default;
+        bool editing;
+
+        // What's being dragged: one of the display's corners (0 to 3, as
+        // InputLayout.Resized numbers them), all of it, or nothing...
+        const int Nothing = -1, All = 4;
+        int grab = Nothing;
+        Point grabAt;               // ...where the mouse was when it was grabbed...
+        InputLayout grabbed;        // ...and where the display was
 
         public TopScreen()
         {
@@ -36,14 +49,42 @@ namespace FlashbackStudio
             BackColor = Color.Black;
         }
 
+        // A click on the picture (not on the input display while it's Editing).
         public event Action Clicked;
 
-        protected override void OnMouseDown(MouseEventArgs e)
+        // After the input display was dragged somewhere else, or resized (to InputsAt).
+        public event Action InputsMoved;
+
+        public InputLayout InputsAt
         {
-            base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left)
-                Clicked?.Invoke();
+            get => layout;
+            set
+            {
+                layout = value.Clamped();
+                if (pixels != null)
+                    Render();
+                Invalidate();
+            }
         }
+
+        public bool Editing
+        {
+            get => editing;
+            set
+            {
+                if (value == editing)
+                    return;
+                editing = value;
+                if (!editing)
+                {
+                    EndDrag();
+                    Cursor = Cursors.Default;
+                }
+                Invalidate();
+            }
+        }
+
+        int S(int px) => px * DeviceDpi / 96;
 
         // How many times 400 x 240 it shows the frame.
         int ScreenScale => Math.Max(1, Math.Min(ClientSize.Width / 400, ClientSize.Height / 240));
@@ -66,6 +107,8 @@ namespace FlashbackStudio
             clipH = h;
             this.input = input;
             Render();
+            if (!Handles)
+                EndDrag();
             Invalidate();
             return sw.Elapsed.TotalMilliseconds;
         }
@@ -87,8 +130,11 @@ namespace FlashbackStudio
             Converter.Scale(pixels, clipW, clipH, k, bgr);
             if (input.HasValue)
             {
-                if (overlay == null || overlay.Width != bgrW || overlay.Height != bgrH)
-                    overlay = new InputOverlay(bgrW, bgrH);
+                // (Made again only for a new size: moving it, or another colour, is quick.)
+                if (overlay == null || !overlay.Fits(bgrW, bgrH, layout))
+                    overlay = new InputOverlay(bgrW, bgrH, layout);
+                else
+                    overlay.Place(layout);
                 overlay.Draw(bgr, input.Value);
             }
         }
@@ -98,6 +144,98 @@ namespace FlashbackStudio
             base.OnResize(e);
             if (pixels != null && ScreenScale != scale)
                 Render();
+        }
+
+        // ---- Dragging the input display
+
+        // Whether the input display is shown with its frame (and can be dragged).
+        bool Handles => editing && bgr != null && input.HasValue && overlay != null;
+
+        // Where the input display is, here.
+        Rectangle Box => new Rectangle((ClientSize.Width - bgrW) / 2 + overlay.X, (ClientSize.Height - bgrH) / 2 + overlay.Y,
+                                       overlay.BoxWidth, overlay.BoxHeight);
+
+        static Point Corner(Rectangle box, int corner) =>
+            new Point((corner & 1) != 0 ? box.Right : box.X - 1, (corner & 2) != 0 ? box.Bottom : box.Y - 1);
+
+        // What's at 'at': one of the input display's corners (near enough), the
+        // rest of it, or nothing.
+        int Hit(Point at)
+        {
+            if (!Handles)
+                return Nothing;
+            Rectangle box = Box;
+            int reach = S(7);
+            for (int c = 0; c < 4; c++)
+            {
+                Point p = Corner(box, c);
+                if (Math.Abs(at.X - p.X) <= reach && Math.Abs(at.Y - p.Y) <= reach)
+                    return c;
+            }
+            return box.Contains(at) ? All : Nothing;
+        }
+
+        static Cursor CursorFor(int hit) =>
+            hit == All ? Cursors.SizeAll : hit == 0 || hit == 3 ? Cursors.SizeNWSE : hit == 1 || hit == 2 ? Cursors.SizeNESW : Cursors.Default;
+
+        void EndDrag()
+        {
+            if (grab == Nothing)
+                return;
+            grab = Nothing;
+            InputsMoved?.Invoke();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left)
+                return;
+            int hit = Hit(e.Location);
+            if (hit != Nothing)
+            {
+                grab = hit;
+                grabAt = e.Location;
+                grabbed = layout;
+            }
+            else
+                Clicked?.Invoke();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (grab == Nothing)
+            {
+                Cursor = CursorFor(Hit(e.Location));
+                return;
+            }
+            // (How far the mouse went, in the top screen's pixels.)
+            float dx = (e.X - grabAt.X) * 240f / bgrH, dy = (e.Y - grabAt.Y) * 240f / bgrH;
+            InputLayout moved = grab == All ? grabbed.Moved(dx, dy) : grabbed.Resized(grab, dx, dy);
+            if (!moved.Equals(layout))
+            {
+                layout = moved;
+                Render();
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (e.Button == MouseButtons.Left)
+            {
+                EndDrag();
+                Cursor = CursorFor(Hit(e.Location));
+            }
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture)
+                EndDrag();      // (the mouse was taken away mid-drag: it stays where it got to)
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -122,6 +260,28 @@ namespace FlashbackStudio
             finally
             {
                 e.Graphics.ReleaseHdc(dc);
+            }
+
+            if (Handles)
+            {
+                // A dashed frame around the input display (white on black, to show
+                // on any picture), with a square at each corner to resize it by.
+                Rectangle box = Box, frame = new Rectangle(box.X - 1, box.Y - 1, box.Width + 1, box.Height + 1);
+                using (Pen black = new Pen(Color.Black))
+                using (Pen white = new Pen(Color.White) { DashStyle = DashStyle.Dash })
+                using (Brush fill = new SolidBrush(Color.White))
+                {
+                    e.Graphics.DrawRectangle(black, frame);
+                    e.Graphics.DrawRectangle(white, frame);
+                    int r = S(4);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        Point p = Corner(box, c);
+                        Rectangle handle = new Rectangle(p.X - r, p.Y - r, 2 * r, 2 * r);
+                        e.Graphics.FillRectangle(fill, handle);
+                        e.Graphics.DrawRectangle(black, handle);
+                    }
+                }
             }
         }
     }

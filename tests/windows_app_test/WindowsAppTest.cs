@@ -9,7 +9,9 @@
 //  - its compacting and trimming, against the 3DS app's (compact_ref, built
 //    with 3ds-app/source/flb.c): they must write the same bytes;
 //  - its input display, against the 3DS app's own (overlay_ref, built from
-//    3ds-app/source/main.c), for many inputs;
+//    3ds-app/source/main.c), for many inputs; and moved, resized and in other
+//    colours, against itself where it starts (on a frame as much bigger), and
+//    in grey;
 //  - whole exports with ffmpeg, if it's found (on PATH): the frames, the input
 //    display and the sound in the MP4, a trimmed part, replacing an MP4,
 //    stopping, and a clip that turns out damaged part way; encoded by the GPU
@@ -749,6 +751,243 @@ static class WindowsAppTest
         Console.WriteLine($"{cases.Count} input display cases compared with Studio's");
     }
 
+    // Some inputs to draw: nothing held, everything held (and a touch), and some in between.
+    static readonly FlbInput[] LayoutInputs =
+    {
+        new FlbInput(),
+        new FlbInput { Buttons = 0xFFFu | FlbInput.KeyTouch, CircleX = 156, CircleY = -156, TouchX = 319, TouchY = 0 },
+        new FlbInput { Buttons = 1u << 9 | 1u << 6 | 1u << 0 | FlbInput.KeyTouch, CircleX = -80, CircleY = 40, TouchX = 160, TouchY = 120 },
+        new FlbInput { Buttons = 1u << 8 | 1u << 7 | 1u << 11 | 1u << 3, CircleX = 400, CircleY = 400 },
+    };
+
+    // A frame w x h of noise, the same around (x0, y0) whatever its size.
+    static byte[] Noise(int w, int h, int x0, int y0)
+    {
+        byte[] f = new byte[w * h * 3];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                for (int c = 0; c < 3; c++)
+                    f[(y * w + x) * 3 + c] = (byte)((uint)((x - x0) * 73856093 ^ (y - y0) * 19349663 ^ c * 83492791) >> 13);
+        return f;
+    }
+
+    static string Show(InputLayout l) => $"{l.Left},{l.Bottom} at {l.Scale}";
+
+    // The input display moved, resized and in another colour (as the player and
+    // exports draw it, where it was dragged): drawn exactly as it is at its
+    // first place and size, on a frame as much bigger; its colour channel by
+    // channel as in grey; always on the screen, and on the frame; and remembered
+    // as it was.
+    static void TestInputLayout()
+    {
+        int before = checks;
+
+        // Moved and resized: a frame as much bigger as the display is, with it
+        // where it starts, has the same picture in it.
+        foreach (int big in new[] { 480, 360, 120, 600, 540 })
+        {
+            int bigW = big * 5 / 3;
+            InputOverlay start = new InputOverlay(bigW, big);
+            float scale = InputLayout.DefaultScale * big / 240;     // (as InputOverlay works it out)
+            if (scale > InputLayout.MaxScale)
+                continue;
+            InputLayout at0 = new InputLayout { Scale = scale, Color = InputLayout.DefaultColor };
+            float maxLeft = 400 - at0.Width, maxBottom = 240 - at0.Height;
+            foreach ((float left, float bottom) in new[] { (0f, 0f), (37.3f, 12.7f), (maxLeft, maxBottom), (maxLeft / 2, 0f), (0f, maxBottom) })
+            {
+                checks++;
+                InputLayout l = new InputLayout { Left = left, Bottom = bottom, Scale = scale, Color = InputLayout.DefaultColor };
+                InputOverlay moved = new InputOverlay(400, 240, l);
+                if (moved.BoxWidth != start.BoxWidth || moved.BoxHeight != start.BoxHeight || moved.X < 0 || moved.Y < 0 ||
+                    moved.X + moved.BoxWidth > 400 || moved.Y + moved.BoxHeight > 240)
+                {
+                    Fail($"input display {Show(l)}: {moved.BoxWidth}x{moved.BoxHeight} at {moved.X},{moved.Y}, " +
+                         $"want {start.BoxWidth}x{start.BoxHeight} on the screen");
+                    continue;
+                }
+                foreach (FlbInput input in LayoutInputs)
+                {
+                    byte[] a = Noise(bigW, big, start.X, start.Y), b = Noise(400, 240, moved.X, moved.Y), clean = (byte[])b.Clone();
+                    start.Draw(a, input);
+                    moved.Draw(b, input);
+                    int wrong = 0;
+                    for (int y = 0; y < 240; y++)
+                        for (int x = 0; x < 400; x++)
+                        {
+                            int o = (y * 400 + x) * 3, bx = x - moved.X + start.X, by = y - moved.Y + start.Y;
+                            bool inBox = x >= moved.X && x < moved.X + moved.BoxWidth && y >= moved.Y && y < moved.Y + moved.BoxHeight;
+                            for (int c = 0; c < 3; c++)
+                                if (inBox ? b[o + c] != a[(by * bigW + bx) * 3 + c] : b[o + c] != clean[o + c])
+                                    wrong++;
+                        }
+                    if (wrong != 0)
+                    {
+                        Fail($"input display {Show(l)}: {wrong} bytes differ from it where it starts, {bigW}x{big}");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Its colour: each channel as it is in that much grey (and black stays black).
+        {
+            checks++;
+            InputLayout l = InputLayout.Default;
+            l.Color = 0x3080F0;
+            byte[][] grey = new byte[3][];
+            InputOverlay o = new InputOverlay(400, 240, l);
+            foreach (FlbInput input in LayoutInputs)
+            {
+                byte[] f = Noise(400, 240, 0, 0);
+                o.Draw(f, input);
+                for (int c = 0; c < 3; c++)
+                {
+                    InputLayout g = InputLayout.Default;
+                    int level = l.Color >> 8 * c & 0xFF;
+                    g.Color = level * 0x010101;
+                    grey[c] = Noise(400, 240, 0, 0);
+                    new InputOverlay(400, 240, g).Draw(grey[c], input);
+                }
+                int wrong = 0;
+                for (int i = 0; i < f.Length; i++)
+                    if (f[i] != grey[i % 3][i])
+                        wrong++;
+                if (wrong != 0)
+                    Fail($"input display in {l.Color:X6}: {wrong} bytes differ from it in grey");
+            }
+            // (The Circle Pad's knob, in the middle with nothing held, is that colour in its middle.)
+            byte[] knob = Noise(400, 240, 0, 0);
+            o.Draw(knob, LayoutInputs[0]);
+            int k = ((o.Y + 23) * 400 + o.X + 20) * 3;     // (25, 29 in the layout, at 0.8)
+            if (knob[k] != 0xF0 || knob[k + 1] != 0x80 || knob[k + 2] != 0x30)
+                Fail($"input display in {l.Color:X6}: the Circle Pad's knob is {knob[k + 2]:X2}{knob[k + 1]:X2}{knob[k]:X2}");
+        }
+
+        // Moved, and given another colour, without being made again (as the
+        // player does while it's dragged): as if it had been made there.
+        {
+            checks++;
+            InputLayout first = InputLayout.Default, then = new InputLayout { Left = 200.5f, Bottom = 100, Scale = InputLayout.DefaultScale, Color = 0xFF2000 };
+            InputOverlay o = new InputOverlay(1200, 720, first);
+            if (!o.Fits(1200, 720, then) || o.Fits(1200, 720, then.Resized(3, 30, 30)) || o.Fits(800, 480, then))
+                Fail("InputOverlay.Fits is wrong");
+            o.Place(then);
+            InputOverlay fresh = new InputOverlay(1200, 720, then);
+            foreach (FlbInput input in LayoutInputs)
+            {
+                byte[] a = Noise(1200, 720, 0, 0), b = (byte[])a.Clone();
+                o.Draw(a, input);
+                fresh.Draw(b, input);
+                if (!a.SequenceEqual(b))
+                {
+                    Fail("input display moved with Place: not as if it had been made there");
+                    break;
+                }
+            }
+        }
+
+        // Anywhere, at any size: kept on the screen, between the smallest and
+        // biggest sizes, and drawn on the frame.
+        InputLayout[] odd =
+        {
+            new InputLayout { Left = -50, Bottom = -50, Scale = 0.01f, Color = -1 },
+            new InputLayout { Left = 1e6f, Bottom = 1e6f, Scale = 100 },
+            new InputLayout { Left = float.NaN, Bottom = float.NaN, Scale = float.NaN },
+            new InputLayout { Left = 400, Bottom = 240, Scale = InputLayout.MaxScale },
+            new InputLayout { Left = 128, Bottom = 72, Scale = InputLayout.MaxScale },
+        };
+        foreach (InputLayout raw in odd)
+        {
+            checks++;
+            InputLayout l = raw.Clamped();
+            if (!(l.Scale >= InputLayout.MinScale && l.Scale <= InputLayout.MaxScale && l.Left >= 0 && l.Bottom >= 0 &&
+                  l.Left + l.Width <= 400.001f && l.Top >= -0.001f && (l.Color & ~0xFFFFFF) == 0))
+                Fail($"input display {Show(raw)}: kept at {Show(l)}, not on the screen");
+            foreach ((int w, int h) in new[] { (400, 240), (200, 120), (1800, 1080), (3600, 2160) })
+            {
+                try
+                {
+                    InputOverlay o = new InputOverlay(w, h, raw);
+                    if (o.X < 0 || o.Y < 0 || o.X + o.BoxWidth > w || o.Y + o.BoxHeight > h)
+                        Fail($"input display {Show(raw)} on {w}x{h}: {o.BoxWidth}x{o.BoxHeight} at {o.X},{o.Y}, off the frame");
+                    foreach (FlbInput input in LayoutInputs)
+                        o.Draw(new byte[w * h * 3], input);
+                }
+                catch (Exception x)
+                {
+                    Fail($"input display {Show(raw)} on {w}x{h}: {x.GetType().Name}: {x.Message}");
+                }
+            }
+        }
+
+        // Dragged: moved with the mouse, as far as the screen's edges; resized by
+        // a corner, the opposite one staying where it is, its shape the same,
+        // between the smallest and biggest sizes and on the screen.
+        {
+            checks++;
+            InputLayout l = new InputLayout { Left = 150, Bottom = 80, Scale = 1, Color = InputLayout.DefaultColor };
+            InputLayout m = l.Moved(10.5f, -20);
+            if (m.Left != 160.5f || m.Bottom != 100 || m.Scale != 1)
+                Fail($"moved by (10.5, -20): {Show(m)}");
+            m = l.Moved(-1000, 1000);
+            if (m.Left != 0 || m.Bottom != 0)
+                Fail($"moved past the bottom left corner: {Show(m)}");
+            m = l.Moved(1000, -1000);
+            if (Math.Abs(m.Left + m.Width - 400) > 0.001f || Math.Abs(m.Top) > 0.001f)
+                Fail($"moved past the top right corner: {Show(m)}");
+            foreach (InputLayout from in new[] { l, InputLayout.Default, new InputLayout { Left = 0, Bottom = 0, Scale = InputLayout.MaxScale } })
+                for (int corner = 0; corner < 4; corner++)
+                {
+                    bool right = (corner & 1) != 0, bottom = (corner & 2) != 0;
+                    float fx = right ? from.Left : from.Left + from.Width, fy = bottom ? from.Top : from.Top + from.Height;
+                    foreach ((float dx, float dy) in new[] { (0f, 0f), (17f, 3f), (-3f, -25f), (500f, 500f), (-500f, -500f), (40f, -40f) })
+                    {
+                        // (dx, dy) outwards from the corner that stays
+                        InputLayout r = from.Resized(corner, right ? dx : -dx, bottom ? dy : -dy);
+                        float rx = right ? r.Left : r.Left + r.Width, ry = bottom ? r.Top : r.Top + r.Height;
+                        float want = Math.Max(Math.Min(Math.Max((from.Width + dx) / 136, (from.Height + dy) / 84), InputLayout.MaxScale),
+                                              InputLayout.MinScale);
+                        string what = $"{Show(from)} resized by corner {corner} by ({dx}, {dy}): {Show(r)}";
+                        if (Math.Abs(rx - fx) > 0.001f || Math.Abs(ry - fy) > 0.001f)
+                            Fail($"{what}: the opposite corner moved");
+                        else if (r.Scale < InputLayout.MinScale || r.Scale > InputLayout.MaxScale || r.Left < 0 || r.Bottom < 0 ||
+                                 r.Left + r.Width > 400.001f || r.Top < -0.001f)
+                            Fail($"{what}: off the screen, or too big or small");
+                        else if (Math.Abs(r.Scale - want) > 0.0001f && r.Left > 0.001f && r.Bottom > 0.001f &&
+                                 r.Left + r.Width < 399.999f && r.Top > 0.001f)
+                            Fail($"{what}: want scale {want}");     // (unless it reached the screen's edge)
+                    }
+                }
+        }
+
+        // Remembered (in settings.txt) as it is, whatever the PC's language;
+        // and nonsense isn't read.
+        {
+            checks++;
+            System.Globalization.CultureInfo culture = Thread.CurrentThread.CurrentCulture;
+            Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("de-DE");     // (a decimal comma)
+            try
+            {
+                if (InputLayout.Default.ToString() != "6,6,0.8,E1E1E1")
+                    Fail($"the input display to start with is remembered as \"{InputLayout.Default}\"");
+                foreach (InputLayout l in new[] { InputLayout.Default, new InputLayout { Left = 1.0f / 3, Bottom = 99.123456f, Scale = 1.2345678f, Color = 0x0A0B0C } })
+                    if (!InputLayout.TryParse(l.ToString(), out InputLayout back) || !back.Equals(l))
+                        Fail($"input display {Show(l)}: remembered as \"{l}\", read back as {Show(back)}");
+                foreach (string s in new[] { "", "1,2,3", "a,b,c,d", "6,6,0.8,GGGGGG", "6,6,0.8,FFF", "NaN,6,0.8,E1E1E1",
+                                             "6,6,Infinity,E1E1E1", "6,6,0.8,E1E1E1,5", "6;6;0.8;E1E1E1", "6,6,0,8,E1E1E1" })
+                    if (InputLayout.TryParse(s, out InputLayout l) || !l.Equals(InputLayout.Default))
+                        Fail($"\"{s}\" was read as an input display layout");
+                if (!InputLayout.TryParse("-100,1000,50,ffffff", out InputLayout far) || !far.Equals(far.Clamped()))
+                    Fail("a remembered input display off the screen isn't brought back onto it");
+            }
+            finally
+            {
+                Thread.CurrentThread.CurrentCulture = culture;
+            }
+        }
+        Console.WriteLine($"{checks - before} input display layouts checked");
+    }
+
     // ---- Converting
 
     static (byte[] Out, string Err, int Exit) Run(string exe, string args)
@@ -798,19 +1037,22 @@ static class WindowsAppTest
     }
 
     // Converts 'clip' and checks the MP4's frames and sound.
-    // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed part.)
+    // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed
+    // part; and the input display where 'layout' says, if it's given.)
     static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0,
                                 ExportSize videoSize = ExportSize.Double, ExportScaling scaling = ExportScaling.Nearest,
-                                ExportEncoder encoder = ExportEncoder.Cpu)
+                                ExportEncoder encoder = ExportEncoder.Cpu, InputLayout? layout = null)
     {
         checks++;
         string mp4 = Path.ChangeExtension(clip, ".mp4");
         if (frames == 0)
             frames = s.Frames;
+        InputLayout at = layout ?? InputLayout.Default;
         try
         {
             using (FlbClip c = FlbClip.Open(clip))
-                Converter.ToMp4(c, first, frames, mp4, inputs, videoSize, scaling, encoder, ffmpeg, _ => { }, CancellationToken.None);
+                Converter.ToMp4(c, first, frames, mp4, inputs ? at : (InputLayout?)null, videoSize, scaling, encoder, ffmpeg, _ => { },
+                                CancellationToken.None);
         }
         catch (Exception x)
         {
@@ -830,7 +1072,7 @@ static class WindowsAppTest
         // ffmpeg as asked, with the input display over it if asked): like it,
         // and less like the frames of the other entries.
         int[] entryOf = EntryOfFrame(s);
-        InputOverlay overlay = inputs && s.Inputs ? new InputOverlay(w, h) : null;
+        InputOverlay overlay = inputs && s.Inputs ? new InputOverlay(w, h, at) : null;
         byte[][] pictures = new byte[s.Copies.Length][], expected = new byte[s.Frames][];
         for (int e = 0; e < s.Copies.Length; e++)
             pictures[e] = videoSize == ExportSize.Double && scaling == ExportScaling.Nearest
@@ -887,6 +1129,11 @@ static class WindowsAppTest
         CheckConversion("1800x1080, bicubic", ffmpeg, "big.flb", s, true, videoSize: ExportSize.P1080, scaling: ExportScaling.Bicubic);
         CheckConversion("800x480, lanczos, a trimmed part", ffmpeg, "big.flb", s, true, 3, 9, scaling: ExportScaling.Lanczos);
         CheckConversion("2400x1440, nearest, compacted", ffmpeg, "plain.flb", plain, true, videoSize: ExportSize.P1440);
+        // The input display moved, resized and in another colour (as dragged in the player).
+        InputLayout moved = new InputLayout { Left = 250.5f, Bottom = 120, Scale = 1.1f, Color = 0xFF4010 };
+        CheckConversion("the input display moved, bigger and red", ffmpeg, "big.flb", s, true, layout: moved);
+        CheckConversion("1800x1080, bicubic, the input display small, top left", ffmpeg, "big.flb", s, true, videoSize: ExportSize.P1080,
+                        scaling: ExportScaling.Bicubic, layout: new InputLayout { Left = 0, Bottom = 1000, Scale = InputLayout.MinScale, Color = 0x20FF20 });
         // Encoded by the GPU, if this PC has one ffmpeg can use (an NVIDIA card).
         if (Converter.GpuAvailable(ffmpeg))
         {
@@ -908,7 +1155,7 @@ static class WindowsAppTest
             try
             {
                 using (FlbClip c = FlbClip.Open(clip))
-                    Converter.ToMp4(c, "big.mp4", true, ExportSize.Double, scaling, ExportEncoder.Cpu, ffmpeg, _ => { }, cancel);
+                    Converter.ToMp4(c, "big.mp4", InputLayout.Default, ExportSize.Double, scaling, ExportEncoder.Cpu, ffmpeg, _ => { }, cancel);
                 Fail($"{what}: finished");
             }
             catch (Exception x)
@@ -944,6 +1191,7 @@ static class WindowsAppTest
         TestCompactor(Path.GetFullPath(args[1]));
         Console.WriteLine($"{checks - compared} compacted and trimmed clips compared with the 3DS app's");
         TestOverlay(Path.GetFullPath(args[0]));
+        TestInputLayout();
         string ffmpeg = Converter.FindFfmpeg();
         if (ffmpeg == null)
             Console.WriteLine("ffmpeg isn't on PATH: the exports weren't tested");
