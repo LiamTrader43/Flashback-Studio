@@ -1728,7 +1728,7 @@ static void drawPlayerStatic(const Player *p)
         row(20, C_NORMAL, " A          Play / pause the selection");
         row(21, C_NORMAL, " Left/Right Previous / next frame");
         row(22, C_NORMAL, " Up/Down    Forward / back 1 second");
-        row(23, C_NORMAL, " L/R        Start / end the selection here");
+        row(23, C_NORMAL, " L/R        Start / end selection here");
         row(24, C_NORMAL, " X          Save it as a new clip");
         row(25, C_NORMAL, " Y          Loop on/off");
         row(26, C_NORMAL, " Touch the bar to jump");
