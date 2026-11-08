@@ -138,3 +138,13 @@ frames. Stopping part way, and a clip that turns out damaged part way, both
 ways, must leave the MP4 that was there as it was, and nothing else behind. If
 the PC has an NVIDIA graphics card, exports encoded by it (NVENC) are checked
 the same way.
+
+Discord exports are checked too: their bitrates for clips of every length
+(worked out without ffmpeg), and exports in two passes, with sharp pixels and
+scaled by ffmpeg (with the GPU chosen: they're the CPU's anyway), each under
+20 MB with its index first (so it plays while it downloads), and the progress
+counting both passes. A clip of busy pictures must fit in much smaller limits
+and come close to them, once after doing its second pass again; a limit it
+can't get under must be refused after two more tries, and one too small to
+try, at once. Stopping in either pass, and a damaged clip, must leave nothing
+behind, x264's files from the first pass included.

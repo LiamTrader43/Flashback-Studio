@@ -15,7 +15,8 @@
 //  - whole exports with ffmpeg, if it's found (on PATH): the frames, the input
 //    display and the sound in the MP4, a trimmed part, replacing an MP4,
 //    stopping, and a clip that turns out damaged part way; encoded by the GPU
-//    too, if this PC has an NVIDIA card.
+//    too, if this PC has an NVIDIA card; and for Discord: its bitrates, and
+//    exports fitting in their limit (or refused if they can't).
 //
 // usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>
 // It writes its clips in the current folder.
@@ -988,6 +989,50 @@ static class WindowsAppTest
         Console.WriteLine($"{checks - before} input display layouts checked");
     }
 
+    // A Discord export's bitrates: video and sound filling 95% of the limit,
+    // the sound from 128 kbit/s down to 64 for long clips, the video at most
+    // Converter.DiscordMaxVideo, and a refusal when there's too little left.
+    static void TestDiscordBitrates()
+    {
+        int before = checks;
+        void Check(string what, int frames, bool audio, long limit, int video, int sound)
+        {
+            checks++;
+            (int Video, int Audio) got;
+            try
+            {
+                got = Converter.DiscordBitrates(frames, Fps, audio, limit);
+            }
+            catch (Exception x)
+            {
+                Fail($"Discord bitrates, {what}: {x.Message}");
+                return;
+            }
+            if (got != (video, sound))
+                Fail($"Discord bitrates, {what}: video {got.Video}, sound {got.Audio}; want {video}, {sound}");
+        }
+        Check("10 minutes", 10 * 60 * Fps, true, Converter.DiscordLimit, 179, 64);
+        Check("10 minutes, no sound", 10 * 60 * Fps, false, Converter.DiscordLimit, 243, 0);
+        Check("5 minutes", 5 * 60 * Fps, true, Converter.DiscordLimit, 433, 64);
+        Check("2 minutes", 2 * 60 * Fps, true, Converter.DiscordLimit, 1129, 128);
+        Check("30 seconds", 30 * Fps, true, Converter.DiscordLimit, 4929, 128);
+        Check("10 seconds (at most)", 10 * Fps, true, Converter.DiscordLimit, Converter.DiscordMaxVideo, 128);
+        Check("one frame", 1, true, Converter.DiscordLimit, Converter.DiscordMaxVideo, 128);
+        Check("3 seconds in 70 kB", 3 * Fps, true, 70_000, 103, 64);
+        checks++;
+        try
+        {
+            Converter.DiscordBitrates(60 * Fps, Fps, true, 200_000);
+            Fail("Discord bitrates: a minute with sound fit in 200 kB");
+        }
+        catch (Exception x)
+        {
+            if (x.Message != $"it's too long to fit in {0.2:0.##} MB")
+                Fail($"Discord bitrates, a minute in 200 kB: \"{x.Message}\"");
+        }
+        Console.WriteLine($"{checks - before} Discord bitrates checked");
+    }
+
     // ---- Converting
 
     static (byte[] Out, string Err, int Exit) Run(string exe, string args)
@@ -1038,26 +1083,60 @@ static class WindowsAppTest
 
     // Converts 'clip' and checks the MP4's frames and sound.
     // (Frames first .. first + frames - 1 of it, if 'frames' isn't 0: a trimmed
-    // part; and the input display where 'layout' says, if it's given.)
+    // part; and the input display where 'layout' says, if it's given. For
+    // Discord, it must fit in 'limit' bytes, aiming at it, the progress must
+    // count both passes' frames, and its index must come first, so it plays
+    // while it downloads.)
     static void CheckConversion(string what, string ffmpeg, string clip, Spec s, bool inputs, int first = 0, int frames = 0,
                                 ExportSize videoSize = ExportSize.Double, ExportScaling scaling = ExportScaling.Nearest,
-                                ExportEncoder encoder = ExportEncoder.Cpu, InputLayout? layout = null)
+                                ExportEncoder encoder = ExportEncoder.Cpu, InputLayout? layout = null, long limit = Converter.DiscordLimit,
+                                double minPsnr = 30)
     {
         checks++;
         string mp4 = Path.ChangeExtension(clip, ".mp4");
         if (frames == 0)
             frames = s.Frames;
         InputLayout at = layout ?? InputLayout.Default;
+        int progress = 0;
         try
         {
             using (FlbClip c = FlbClip.Open(clip))
-                Converter.ToMp4(c, first, frames, mp4, inputs ? at : (InputLayout?)null, videoSize, scaling, encoder, ffmpeg, _ => { },
-                                CancellationToken.None);
+                Converter.ToMp4(c, first, frames, mp4, inputs ? at : (InputLayout?)null, videoSize, scaling, encoder, ffmpeg,
+                                done => progress = done, CancellationToken.None, limit);
         }
         catch (Exception x)
         {
             Fail($"{what}: {x.Message}");
             return;
+        }
+        if (progress != frames * Converter.Passes(videoSize))
+            Fail($"{what}: the progress ended at {progress} frames, not {frames * Converter.Passes(videoSize)}");
+        if (videoSize == ExportSize.Discord)
+        {
+            long length = new FileInfo(mp4).Length;
+            (int videoRate, int soundRate) = Converter.DiscordBitrates(frames, Fps, s.Audio, limit);
+            long aim = (long)(videoRate + soundRate) * 1000 / 8 * frames / Fps;
+            if (length > limit)
+                Fail($"{what}: {length} bytes, more than {limit}");
+            else if (videoRate < Converter.DiscordMaxVideo && length < aim * 0.8)
+                Fail($"{what}: {length} bytes, far from the {aim} it aimed at");
+            byte[] bytes = File.ReadAllBytes(mp4);
+            int moov = -1, mdat = -1;
+            for (long pos = 0; pos + 8 <= bytes.Length; )
+            {
+                long box = (long)bytes[pos] << 24 | (long)bytes[pos + 1] << 16 | (long)bytes[pos + 2] << 8 | bytes[pos + 3];
+                string type = Encoding.ASCII.GetString(bytes, (int)pos + 4, 4);
+                if (type == "moov" && moov < 0)
+                    moov = (int)pos;
+                if (type == "mdat" && mdat < 0)
+                    mdat = (int)pos;
+                if (box < 8)
+                    break;
+                pos += box;
+            }
+            if (moov < 0 || mdat < 0 || moov > mdat)
+                Fail($"{what}: the MP4's index (moov at {moov}) isn't before its frames (mdat at {mdat})");
+            Console.WriteLine($"  {what}: {length} bytes ({100.0 * length / limit:F1}% of {limit})");
         }
 
         (int w, int h) = Converter.VideoSize(s.Width, s.Height, videoSize);
@@ -1075,7 +1154,7 @@ static class WindowsAppTest
         InputOverlay overlay = inputs && s.Inputs ? new InputOverlay(w, h, at) : null;
         byte[][] pictures = new byte[s.Copies.Length][], expected = new byte[s.Frames][];
         for (int e = 0; e < s.Copies.Length; e++)
-            pictures[e] = videoSize == ExportSize.Double && scaling == ExportScaling.Nearest
+            pictures[e] = (videoSize == ExportSize.Double || videoSize == ExportSize.Discord) && scaling == ExportScaling.Nearest
                 ? Bgr((x, y) => PixelOf(e, x / 2, y / 2), w, h)
                 : FfmpegScale(ffmpeg, Bgr((x, y) => PixelOf(e, x, y), s.Width, s.Height), s.Width, s.Height, w, h,
                               Converter.ScaleFlags[(int)scaling]);
@@ -1092,7 +1171,7 @@ static class WindowsAppTest
             double other = Enumerable.Range(0, s.Frames).Where(g => entryOf[g] != entryOf[f])
                                      .Select(g => Psnr(video, v * size, expected[g], size)).DefaultIfEmpty(0).Max();
             worst = Math.Min(worst, right);
-            if (right < 30 || right < other + 6)
+            if (right < minPsnr || right < other + 6)
             {
                 Fail($"{what}: frame {f} is {right:F1} dB from what it should be ({other:F1} from another)");
                 return;
@@ -1113,7 +1192,8 @@ static class WindowsAppTest
     }
 
     static string[] Leftovers(string dir) =>
-        Directory.GetFiles(dir, "*.part").Concat(Directory.GetFiles(Path.GetTempPath(), "FlashbackStudio-*.wav")).ToArray();
+        Directory.GetFiles(dir, "*.part").Concat(Directory.GetFiles(Path.GetTempPath(), "FlashbackStudio-*.wav"))
+                 .Concat(Directory.GetFiles(Path.GetTempPath(), "FlashbackStudio-*-x264*")).ToArray();
 
     static void TestConversions(string ffmpeg)
     {
@@ -1144,23 +1224,44 @@ static class WindowsAppTest
         else
             Console.WriteLine("  no NVIDIA encoder here: exports by the GPU weren't tested");
 
+        // For Discord: in two passes, at twice the size (here, or scaled by
+        // ffmpeg), whatever encoder was chosen. Then a longer clip, every frame
+        // a new picture (hard to compress), in a much smaller limit: it must
+        // aim at it and fit.
+        CheckConversion("for Discord", ffmpeg, "big.flb", s, true, videoSize: ExportSize.Discord);
+        // (This test's pictures, much busier than a game's, scaled smoothly, come
+        // out at about 25 dB at a Discord export's 8 Mbit/s at most: CRF 12, as
+        // other exports use, takes more.)
+        CheckConversion("for Discord, bilinear, a trimmed part, the GPU chosen", ffmpeg, "big.flb", s, true, 2, 8, ExportSize.Discord,
+                        ExportScaling.Bilinear, ExportEncoder.Gpu, minPsnr: 20);
+        CheckConversion("for Discord, compacted, without sound or inputs", ffmpeg, "plain.flb", plain, true, videoSize: ExportSize.Discord);
+        Spec busy = new Spec { Width = 400, Height = 240, Audio = true, Inputs = true, Copies = Enumerable.Repeat(1, 90).ToArray() };
+        Write("busy.flb", busy);
+        CheckFits("for Discord, 3 busy seconds in 1 MB", ffmpeg, "busy.flb", busy, 1_000_000);
+        CheckFits("for Discord, 3 busy seconds in 400 kB", ffmpeg, "busy.flb", busy, 400_000);
+        // (In 100 kB, x264's second pass comes out over, and is done again at a
+        // lower bitrate: the progress goes back.)
+        CheckFits("for Discord, 3 busy seconds in 100 kB", ffmpeg, "busy.flb", busy, 100_000, true);
+
         // Stopping, and a clip that turns out damaged part way (scaled here, and
-        // by ffmpeg): the MP4 that was there is left as it was, and nothing else
-        // is left behind.
+        // by ffmpeg), and Discord exports stopped or refused: the MP4 that was
+        // there is left as it was, and nothing else is left behind.
         string[] before = Leftovers(".");
         File.WriteAllText("big.mp4", "the old MP4");
-        void Stopped(string what, string clip, CancellationToken cancel, string message, ExportScaling scaling = ExportScaling.Nearest)
+        void Stopped(string what, string clip, CancellationToken cancel, string message, ExportScaling scaling = ExportScaling.Nearest,
+                     ExportSize size = ExportSize.Double, long limit = Converter.DiscordLimit, Action<int> progress = null)
         {
             checks++;
             try
             {
                 using (FlbClip c = FlbClip.Open(clip))
-                    Converter.ToMp4(c, "big.mp4", InputLayout.Default, ExportSize.Double, scaling, ExportEncoder.Cpu, ffmpeg, _ => { }, cancel);
+                    Converter.ToMp4(c, 0, c.FrameCount, "big.mp4", InputLayout.Default, size, scaling, ExportEncoder.Cpu, ffmpeg,
+                                    progress ?? (_ => { }), cancel, limit);
                 Fail($"{what}: finished");
             }
             catch (Exception x)
             {
-                if (message != null ? x.Message != message : !(x is OperationCanceledException))
+                if (message != null ? !x.Message.StartsWith(message) : !(x is OperationCanceledException))
                     Fail($"{what}: {x.GetType().Name}: {x.Message}");
             }
             if (File.ReadAllText("big.mp4") != "the old MP4")
@@ -1176,6 +1277,60 @@ static class WindowsAppTest
         Patch32("damaged.flb", index + 3 * 16 + 4, Stored(s, 3).Length - 1);
         Stopped("damaged part way", "damaged.flb", CancellationToken.None, "frame 3 is damaged");
         Stopped("damaged part way, scaled by ffmpeg", "damaged.flb", CancellationToken.None, "frame 3 is damaged", ExportScaling.Spline);
+        Stopped("for Discord, stopped", "big.flb", stop.Token, null, size: ExportSize.Discord);
+        CancellationTokenSource late = new CancellationTokenSource();
+        Stopped("for Discord, stopped in the second pass", "busy.flb", late.Token, null, size: ExportSize.Discord,
+                progress: done => { if (done > busy.Frames + 10) late.Cancel(); });
+        Stopped("for Discord, damaged part way", "damaged.flb", CancellationToken.None, "frame 3 is damaged", size: ExportSize.Discord);
+        Stopped("for Discord, too long for the limit", "busy.flb", CancellationToken.None, $"it's too long to fit in {0.04:0.##} MB",
+                size: ExportSize.Discord, limit: 40_000);
+        // (Here x264 can't get the busy frames that small: done again twice at
+        // lower bitrates, then refused.)
+        Stopped("for Discord, still too big done again", "busy.flb", CancellationToken.None, "it came out at ",
+                size: ExportSize.Discord, limit: 70_000);
+    }
+
+    // Exports 'clip' for Discord in 'limit' bytes, and checks it fits (and aims
+    // at it), with all its frames and its sound (and, if 'redo', that its
+    // second pass was done again).
+    static void CheckFits(string what, string ffmpeg, string clip, Spec s, long limit, bool redo = false)
+    {
+        checks++;
+        string mp4 = Path.ChangeExtension(clip, ".mp4");
+        int last = 0;
+        bool back = false;
+        try
+        {
+            using (FlbClip c = FlbClip.Open(clip))
+                Converter.ToMp4(c, 0, s.Frames, mp4, InputLayout.Default, ExportSize.Discord, ExportScaling.Nearest, ExportEncoder.Cpu,
+                                ffmpeg, done =>
+                                {
+                                    back |= done < last;
+                                    last = done;
+                                }, CancellationToken.None, limit);
+        }
+        catch (Exception x)
+        {
+            Fail($"{what}: {x.Message}");
+            return;
+        }
+        if (redo && !back)
+            Fail($"{what}: the second pass wasn't done again");
+        // (x264 aims less well at 3 seconds of these pictures than at a game's:
+        // their video came out 17% under its bitrate, so about 80% of the
+        // limit, where real clips of 1 to 10 minutes came to 94 to 96%.)
+        long length = new FileInfo(mp4).Length;
+        if (length > limit || length < limit * 0.7)
+            Fail($"{what}: {length} bytes, for {limit}");
+        (int w, int h) = Converter.VideoSize(s.Width, s.Height, ExportSize.Discord);
+        int frames = Run(ffmpeg, $"-v error -i \"{mp4}\" -f rawvideo -pix_fmt gray -").Out.Length / (w * h);
+        var audio = Run(ffmpeg, $"-v error -i \"{mp4}\" -map 0:a -f s16le -ac 2 -ar 48000 -");
+        long samples = audio.Out.Length / 4, want = (long)s.Frames * 48000 / Fps;
+        if (frames != s.Frames)
+            Fail($"{what}: {frames} frames, want {s.Frames}");
+        if (audio.Exit != 0 || Math.Abs(samples - want) > 1024)
+            Fail($"{what}: {samples} sound samples, want about {want}");
+        Console.WriteLine($"  {what}: {length} bytes ({100.0 * length / limit:F1}%)");
     }
 
     static int Main(string[] args)
@@ -1192,6 +1347,7 @@ static class WindowsAppTest
         Console.WriteLine($"{checks - compared} compacted and trimmed clips compared with the 3DS app's");
         TestOverlay(Path.GetFullPath(args[0]));
         TestInputLayout();
+        TestDiscordBitrates();
         string ffmpeg = Converter.FindFfmpeg();
         if (ffmpeg == null)
             Console.WriteLine("ffmpeg isn't on PATH: the exports weren't tested");

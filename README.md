@@ -43,7 +43,8 @@ On the 3DS, start the app and your clips are on the bottom screen: <kbd>A</kbd> 
 ## Recommended export settings
 
 * **YouTube:** 1440p or 4K, with **Nearest** scaling. YouTube gives bigger uploads a higher quality, which keeps the 3DS's pixels sharp.
-* **Discord or a phone:** 800x480 (the starting size), for small files.
+* **Discord:** the **Discord** size: 800x480, always under 20 MB (Discord's upload limit without Nitro).
+* **A phone:** 800x480 (the starting size), for small files.
 * **Video editors:** 1080p, to match the rest of your project.
 * **Encoder:** the **GPU** if you have an NVIDIA graphics card. It's faster, with the same picture quality, in slightly bigger files.
 

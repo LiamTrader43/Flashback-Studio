@@ -687,14 +687,15 @@ namespace FlashbackStudio
         void PaintVideoChoices(Painter p, int r, ClipInfo c)
         {
             string twice = c != null ? $"{c.Width * 2}x{c.Height * 2}" : "2x";
-            string[] sizes = { twice, "1080p", "1440p", "4K" };
+            string[] sizes = { twice, "1080p", "1440p", "4K", "Discord" };
             string[] items = new string[sizes.Length];
             items[0] = c != null ? twice + " (2x)" : "2x the clip's size";
-            for (int i = 1; i < sizes.Length; i++)
+            for (int i = 1; i < (int)ExportSize.Discord; i++)
             {
                 (int w, int h) = Converter.VideoSize(400, 240, (ExportSize)i);
                 items[i] = $"{sizes[i]} ({w}x{h})";
             }
+            items[(int)ExportSize.Discord] = $"Discord ({twice}, under {Names.Size(Converter.DiscordLimit)})";
             p.Text(r, 1, Style.Normal, "Size:");
             int col = Dropdown(p, r, 7, 11, sizes[(int)exportSize], items, (int)exportSize, i =>
             {
@@ -711,10 +712,16 @@ namespace FlashbackStudio
 
         // What encodes the video: a dropdown. If the GPU can't here (no NVIDIA
         // card, or no driver for it), it's the CPU, and the GPU can't be chosen.
+        // (A Discord export is always the CPU's: no choice.)
         void PaintEncoderChoice(Painter p, int r)
         {
             bool gpu = exportEncoder == ExportEncoder.Gpu && gpuFound != false;
             p.Text(r, 1, Style.Normal, "Encoder:");
+            if (exportSize == ExportSize.Discord)
+            {
+                p.Text(r, 10, Style.Dim, $"CPU (x264), 2 passes to fit {Names.Size(Converter.DiscordLimit)}");
+                return;
+            }
             string[] items = { "CPU (x264)", gpuFound == false ? "GPU (no NVIDIA card found)" : "GPU (NVIDIA NVENC)" };
             int col = Dropdown(p, r, 10, 7, gpu ? "GPU" : "CPU", items, gpu ? 1 : 0, i =>
             {
@@ -1177,9 +1184,11 @@ namespace FlashbackStudio
             InputLayout? inputs = exportInputs ? inputLayout : (InputLayout?)null;     // (as the player shows it)
             ExportSize size = exportSize;
             ExportScaling scaling = exportScaling;
-            // (The GPU if it can encode here: if that isn't known yet, the job finds out first.)
-            bool gpu = exportEncoder == ExportEncoder.Gpu;
+            // (The GPU if it can encode here: if that isn't known yet, the job
+            // finds out first. Not for Discord, which is always the CPU's.)
+            bool gpu = exportEncoder == ExportEncoder.Gpu && size != ExportSize.Discord;
             ExportEncoder Encoder() => gpu && Converter.GpuAvailable(ffmpeg) ? ExportEncoder.Gpu : ExportEncoder.Cpu;
+            int passes = Converter.Passes(size);
             if (mode == Mode.ConfirmExport)
             {
                 string path = exportPath, mp4 = ExportMp4(), name = Path.GetFileName(mp4);
@@ -1193,14 +1202,16 @@ namespace FlashbackStudio
                         ExportEncoder encoder = Encoder();
                         using (FlbClip clip = FlbClip.Open(path))
                             Converter.ToMp4(clip, firstFrame, count, mp4, inputs, size, scaling, encoder, ffmpeg,
-                                            done => Progress((double)done / count, $"Frame {done} of {count}"), token);
+                                            done => Progress((double)done / ((double)count * passes), FramesDone(done, count, passes)), token);
                     }
                     catch (OperationCanceledException)
                     {
                         return ("Exporting stopped; no MP4 was saved.", true, null);
                     }
                     jobShow = mp4;
-                    return ($"Exported {name} in {(int)sw.Elapsed.TotalSeconds} s.", true, null);
+                    // (For Discord, how big it came out: under the limit.)
+                    string big = size == ExportSize.Discord ? $" ({Names.Size(new FileInfo(mp4).Length)})" : "";
+                    return ($"Exported {name}{big} in {(int)sw.Elapsed.TotalSeconds} s.", true, null);
                 });
                 return;
             }
@@ -1219,7 +1230,7 @@ namespace FlashbackStudio
             string dir = ExportDir();
             RunJob("Exporting...", "", token =>
             {
-                long total = Math.Max(1, todo.Sum(c => (long)c.FrameCount)), before = 0;
+                long total = Math.Max(1, todo.Sum(c => (long)c.FrameCount) * passes), before = 0;
                 int exported = 0, failures = 0;
                 string failed = null;
                 ExportEncoder encoder = Encoder();
@@ -1231,7 +1242,7 @@ namespace FlashbackStudio
                     {
                         using (FlbClip clip = FlbClip.Open(c.Path))
                             Converter.ToMp4(clip, TargetMp4(c), inputs, size, scaling, encoder, ffmpeg,
-                                            done => Progress((before + done) / (double)total, $"Frame {done} of {c.FrameCount}"), token);
+                                            done => Progress((before + done) / (double)total, FramesDone(done, c.FrameCount, passes)), token);
                         exported++;
                     }
                     catch (OperationCanceledException)
@@ -1243,7 +1254,7 @@ namespace FlashbackStudio
                         failures++;
                         failed = failed ?? $"{c.Name}: {e.Message}";
                     }
-                    before += c.FrameCount;
+                    before += (long)c.FrameCount * passes;
                 }
                 string result = $"Exported {exported} clip{(exported == 1 ? "" : "s")}";
                 if (skipped > 0)
@@ -1254,6 +1265,17 @@ namespace FlashbackStudio
                     jobShow = dir;
                 return (result + ".", failures == 0, null);
             });
+        }
+
+        // An export's progress line, 'done' frames into 'count' (counting both
+        // passes' frames, if there are two: a Discord export).
+        static string FramesDone(int done, int count, int passes)
+        {
+            if (passes == 1)
+                return $"Frame {done} of {count}";
+            count = Math.Max(1, count);
+            int pass = done == 0 ? 0 : Math.Min((done - 1) / count, passes - 1);
+            return $"Pass {pass + 1} of {passes}: frame {done - pass * count} of {count}";
         }
 
         // ---- Jobs

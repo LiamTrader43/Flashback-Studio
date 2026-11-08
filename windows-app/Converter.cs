@@ -13,8 +13,9 @@ using System.Threading;
 namespace FlashbackStudio
 {
     // An exported video's size: twice the clip's, or 1080, 1440 or 2160 pixels
-    // tall (keeping the 3DS screen's shape)...
-    enum ExportSize { Double, P1080, P1440, P2160 }
+    // tall (keeping the 3DS screen's shape), or twice the clip's in a file
+    // small enough to send on Discord (see DiscordLimit)...
+    enum ExportSize { Double, P1080, P1440, P2160, Discord }
 
     // ...and how its frames are scaled up to it: each pixel copied (nearest:
     // sharp pixels), or smoothed, with ffmpeg's scaler...
@@ -59,7 +60,7 @@ namespace FlashbackStudio
         // The video's size, for a clip w x h.
         public static (int W, int H) VideoSize(int w, int h, ExportSize size)
         {
-            if (size == ExportSize.Double)
+            if (size == ExportSize.Double || size == ExportSize.Discord)
                 return (w * 2, h * 2);
             int vh = size == ExportSize.P1080 ? 1080 : size == ExportSize.P1440 ? 1440 : 2160;
             return ((vh * w / h + 1) & ~1, vh);     // (an even width, as H.264's 4:2:0 needs)
@@ -67,6 +68,45 @@ namespace FlashbackStudio
 
         // ffmpeg's scale filter's flags, for each ExportScaling.
         public static readonly string[] ScaleFlags = { "neighbor", "bilinear", "bicubic", "lanczos", "spline" };
+
+        // ---- Discord
+
+        // Discord's upload limit without Nitro (20 MB since August 2026): a
+        // Discord export is made to fit under it. Its video is twice the
+        // clip's size whatever its length: at the same bitrate, half the size
+        // looked no better on real clips (and worse, mostly: H.264's 4:2:0
+        // keeps a colour for each 2 x 2 pixels, so only at twice the size are
+        // the 3DS's own pixels' colours kept).
+        public const long DiscordLimit = 20_000_000;
+
+        // A Discord export's video bitrate at most (kbit/s), for short clips:
+        // about what an export at twice the size uses on a busy clip (8 to 14
+        // on Mario Kart 7), without filling 20 MB for a few seconds.
+        public const int DiscordMaxVideo = 8000;
+
+        // How many times an export goes through the frames: twice for Discord
+        // (x264's two passes, which aim at a size), once otherwise.
+        public static int Passes(ExportSize size) => size == ExportSize.Discord ? 2 : 1;
+
+        // The bitrates (kbit/s) of a Discord export of 'frames' frames at 'fps'
+        // fitting in 'limit' bytes: the file aims at 95% of it (the rest is
+        // room for x264 and the AAC encoder missing a little: on real clips,
+        // 0.2 to 1.6% over), less the MP4's index, about 1.1 kB a second
+        // (each frame's and sound packet's size and place: 661 kB for 10
+        // minutes), which leaves the video and sound's bitrates. The sound
+        // gets 128 kbit/s, or less for long clips (down to 64), and the video
+        // the rest, up to DiscordMaxVideo. Throws if the clip is too long for
+        // a watchable video (only with a smaller limit: 10 minutes, the
+        // longest a clip can be, still gets about 180 kbit/s).
+        public static (int Video, int Audio) DiscordBitrates(int frames, int fps, bool audio, long limit)
+        {
+            double seconds = Math.Max(1, frames) / (double)fps, total = (limit * 0.95 / seconds - 1200) * 8 / 1000;
+            int sound = audio ? (int)Math.Max(64, Math.Min(128, Math.Round(total / 10 / 16) * 16)) : 0;
+            int video = (int)Math.Min(DiscordMaxVideo, total - sound);
+            if (video < 50)
+                throw new Exception($"it's too long to fit in {limit / 1e6:0.##} MB");
+            return (video, sound);
+        }
 
         static readonly Dictionary<string, bool> gpuChecked = new Dictionary<string, bool>();
 
@@ -151,50 +191,122 @@ namespace FlashbackStudio
             ToMp4(clip, 0, clip.FrameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel);
 
         // The same, for frames firstFrame .. firstFrame + frameCount - 1 of it
-        // (a trimmed part), with their sound.
+        // (a trimmed part), with their sound. A Discord export goes through the
+        // frames twice (x264's two passes: Passes(size)), and 'progress' counts
+        // the frames of both, the second pass's after the first's; it's
+        // encoded by the CPU whatever 'encoder' says (NVENC can't aim at a
+        // size as well), and if it still comes out over the limit (it never
+        // did on real clips), the second pass is done again at a lower bitrate.
         public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
-                                 Action<int> progress, CancellationToken cancel)
+                                 Action<int> progress, CancellationToken cancel) =>
+            ToMp4(clip, firstFrame, frameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel, DiscordLimit);
+
+        // The same, a Discord export fitting in 'limit' bytes (for the tests).
+        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
+                                 ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
+                                 Action<int> progress, CancellationToken cancel, long limit)
         {
             (int w, int h) = VideoSize(clip.Width, clip.Height, size);
-            bool here = size == ExportSize.Double && scaling == ExportScaling.Nearest;     // (each pixel 2 x 2, here)
+            bool here = (size == ExportSize.Double || size == ExportSize.Discord) && scaling == ExportScaling.Nearest;     // (each pixel 2 x 2, here)
             InputOverlay overlay = inputs.HasValue && clip.Inputs != null ? new InputOverlay(w, h, inputs.Value) : null;
             string part = mp4 + ".part";     // the MP4, until it's finished
-            string wav = null;
-            Process p = null, scaler = null;
-            List<string> errors = new List<string>(), scalerErrors = new List<string>();
-            Thread feeder = null;
-            Exception fed = null;           // what stopped the feeder early, if anything
+            string wav = null, stats = null;
             bool done = false;
             Throttle(CurrentProcess, false);
             try
             {
-                StringBuilder args = new StringBuilder(InputArgs(w, h, clip.Fps));
+                string sound = "";
                 if (clip.HasAudio)
                 {
                     wav = Path.Combine(Path.GetTempPath(), "FlashbackStudio-" + Guid.NewGuid().ToString("N") + ".wav");
                     clip.WriteWav(wav, firstFrame, frameCount);
-                    args.Append($"-i \"{wav}\" -map 0:v -map 1:a ");
+                    sound = $"-i \"{wav}\" -map 0:v -map 1:a ";
                 }
-                if (encoder == ExportEncoder.Gpu)
+                // The frames through ffmpeg, with 'output' after their input on
+                // its command line, 'before' frames already done.
+                void Pass(string output, int before) =>
+                    Encode(clip, firstFrame, frameCount, w, h, here, scaling, overlay, ffmpeg, InputArgs(w, h, clip.Fps) + output,
+                           n => progress(before + n), cancel);
+
+                if (size == ExportSize.Discord)
                 {
-                    // The same quality as x264's below (on a real clip scaled to
-                    // 4K, PSNR 54.8 dB for both), encoded in about a third of the
-                    // time (6.6 s instead of 17.7), in files a third to a half
-                    // bigger. (A whole export gains less: the frames' way through
-                    // the scaler and here takes its time too.)
-                    args.Append("-c:v h264_nvenc -preset p4 -rc constqp -qp 12 -pix_fmt yuv420p ");
+                    (int video, int audio) = DiscordBitrates(frameCount, clip.Fps, clip.HasAudio, limit);
+                    // (x264 keeps what the first pass learnt in files named after this.)
+                    stats = Path.Combine(Path.GetTempPath(), "FlashbackStudio-" + Guid.NewGuid().ToString("N") + "-x264");
+                    // ("slow": on a busy clip at 500 kbit/s, 0.3 dB better than the
+                    // default, in 1.7 times the time; "slower" was 1 dB better, in 5.)
+                    string x264 = $"-c:v libx264 -preset slow -pix_fmt yuv420p -passlogfile \"{stats}\" ";
+                    Pass(x264 + $"-b:v {video}k -pass 1 -an -f null -", 0);
+                    for (int tries = 1; ; tries++)
+                    {
+                        Pass(sound + x264 + $"-b:v {video}k -pass 2 " + (audio > 0 ? $"-c:a aac -b:a {audio}k -ar 48000 " : "") +
+                             $"-movflags +faststart -f mp4 \"{part}\"", frameCount);
+                        long got = new FileInfo(part).Length;
+                        if (got <= limit)
+                            break;
+                        if (tries == 3)
+                            throw new Exception($"it came out at {got / 1e6:0.00} MB, more than the {limit / 1e6:0.##} MB it should fit in");
+                        video = (int)(video * 0.95 * limit / got);
+                    }
                 }
                 else
                 {
-                    args.Append("-c:v libx264 -crf 12 -pix_fmt yuv420p ");
-                    if (size != ExportSize.Double)
-                        args.Append("-preset faster ");     // (at 1080p, about 3 times quicker than the default, for much the same file)
+                    StringBuilder args = new StringBuilder(sound);
+                    if (encoder == ExportEncoder.Gpu)
+                    {
+                        // The same quality as x264's below (on a real clip scaled to
+                        // 4K, PSNR 54.8 dB for both), encoded in about a third of the
+                        // time (6.6 s instead of 17.7), in files a third to a half
+                        // bigger. (A whole export gains less: the frames' way through
+                        // the scaler and here takes its time too.)
+                        args.Append("-c:v h264_nvenc -preset p4 -rc constqp -qp 12 -pix_fmt yuv420p ");
+                    }
+                    else
+                    {
+                        args.Append("-c:v libx264 -crf 12 -pix_fmt yuv420p ");
+                        if (size != ExportSize.Double)
+                            args.Append("-preset faster ");     // (at 1080p, about 3 times quicker than the default, for much the same file)
+                    }
+                    if (clip.HasAudio)
+                        args.Append("-c:a aac -b:a 192k -ar 48000 ");
+                    args.Append($"-f mp4 \"{part}\"");
+                    Pass(args.ToString(), 0);
                 }
-                if (clip.HasAudio)
-                    args.Append("-c:a aac -b:a 192k -ar 48000 ");
-                args.Append($"-f mp4 \"{part}\"");
-                p = StartFfmpeg(ffmpeg, args.ToString(), false, errors);
+
+                if (File.Exists(mp4))
+                    File.Delete(mp4);
+                File.Move(part, mp4);
+                done = true;
+            }
+            finally
+            {
+                if (wav != null)
+                    TryDelete(wav);
+                if (stats != null)
+                    foreach (string file in Directory.GetFiles(Path.GetTempPath(), Path.GetFileName(stats) + "*"))
+                        TryDelete(file);
+                if (!done)
+                    TryDelete(part);
+                Throttle(CurrentProcess, true);
+            }
+        }
+
+        // Sends frames firstFrame .. firstFrame + frameCount - 1 of 'clip', w x h
+        // (scaled here if 'here', each pixel 2 x 2, or else by a second ffmpeg,
+        // with 'scaling'), with the input display drawn over them by 'overlay'
+        // (if it isn't null), to an ffmpeg started with 'args', and waits for it
+        // to finish. 'progress' is told how many frames are done, now and then.
+        static void Encode(FlbClip clip, int firstFrame, int frameCount, int w, int h, bool here, ExportScaling scaling,
+                           InputOverlay overlay, string ffmpeg, string args, Action<int> progress, CancellationToken cancel)
+        {
+            Process p = null, scaler = null;
+            List<string> errors = new List<string>(), scalerErrors = new List<string>();
+            Thread feeder = null;
+            Exception fed = null;           // what stopped the feeder early, if anything
+            try
+            {
+                p = StartFfmpeg(ffmpeg, args, false, errors);
 
                 // The frames before the input display: scaled here, or sent to the
                 // scaler by the feeder thread (with how many times each is shown)
@@ -295,11 +407,6 @@ namespace FlashbackStudio
                 if (p.ExitCode != 0 || written != frameCount)
                     lock (errors)
                         throw new Exception("ffmpeg failed: " + Reason(errors, p.ExitCode));
-
-                if (File.Exists(mp4))
-                    File.Delete(mp4);
-                File.Move(part, mp4);
-                done = true;
             }
             finally
             {
@@ -308,11 +415,6 @@ namespace FlashbackStudio
                 feeder?.Join();     // (its writes fail once the scaler's gone)
                 p?.Dispose();
                 scaler?.Dispose();
-                if (wav != null)
-                    TryDelete(wav);
-                if (!done)
-                    TryDelete(part);
-                Throttle(CurrentProcess, true);
             }
         }
 
