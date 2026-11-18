@@ -21,7 +21,8 @@ namespace FlashbackStudio
         public int Frame;                   // clip frame on screen (copies counted)
         public int ShownEntry = -1;         // index entry in Pixels, or -1
         public readonly ushort[] Pixels;    // the frame on screen, decoded
-        readonly ushort[] decoded;
+        public readonly ushort[] Bottom;    // the bottom screen's with it (null: the clip has none)
+        readonly FlbClip.Pictures decoded;  // (the clip's pictures as they're read: a frame can be what changed since the one before)
         public bool Playing = true, Loop, ShowInputs, ShowStats;
         public int Speed = SpeedNormal;
         public string Error;                // why the clip can't be read further
@@ -55,7 +56,8 @@ namespace FlashbackStudio
             Clip = FlbClip.Open(path);
             Title = Names.Pretty(System.IO.Path.GetFileName(path));
             Pixels = new ushort[Clip.Width * Clip.Height];
-            decoded = new ushort[Pixels.Length];
+            Bottom = Clip.HasBottom ? new ushort[Clip.BottomWidth * Clip.BottomHeight] : null;
+            decoded = Clip.NewPictures();
             Loop = loop;
             ShowInputs = showInputs;
             ShowStats = showStats;
@@ -147,11 +149,14 @@ namespace FlashbackStudio
         // The whole clip is selected (nothing trimmed off)?
         public bool TrimIsWhole => TrimIn == 0 && TrimOut + 1 == Count;
 
-        // Whether clip frame 'frame' is a copy of the one before (a missed frame).
+        // Whether clip frame 'frame' is a copy of the one before because it was
+        // missed. (An entry's missed frames are counted, not placed: they're
+        // taken to be its last copies. In a clip with screens, its other copies
+        // are frames where nothing had changed.)
         public bool IsMissed(int frame)
         {
             FlbClip.Entry e = Clip[Clip.EntryForFrame(frame)];
-            return frame > e.FirstFrame;
+            return frame >= e.FirstFrame + e.Copies - e.Missed;
         }
 
         // Moves the clock on, and reads the frame that's now on screen if it's
@@ -187,9 +192,11 @@ namespace FlashbackStudio
                 Stopwatch sw = Stopwatch.StartNew();
                 try
                 {
-                    // (Into a frame of its own: a damaged one leaves the last good one on screen.)
-                    Clip.DecodeEntry(entry, decoded);
-                    Array.Copy(decoded, Pixels, Pixels.Length);
+                    // (Into pictures of its own: a damaged one leaves the last good one on screen.)
+                    Clip.Show(decoded, entry);
+                    Array.Copy(decoded.Top, Pixels, Pixels.Length);
+                    if (Bottom != null)
+                        Array.Copy(decoded.Bottom, Bottom, Bottom.Length);
                     DecodeMs = sw.Elapsed.TotalMilliseconds;
                     if (Playing && ShownEntry != -1 && entry > ShownEntry + 1)
                         Skipped += entry - ShownEntry - 1;
@@ -244,7 +251,7 @@ namespace FlashbackStudio
             int n = (int)Math.Min(AudioOut.BufferSamples, AudioTotal - audioNext);
             try
             {
-                Clip.ReadAudio(Clip[0].AudioPos + audioNext, n, audioBuf);
+                Clip.ReadAudio(Clip.FirstAudioPos + audioNext, n, audioBuf);
             }
             catch (InvalidDataException e)
             {

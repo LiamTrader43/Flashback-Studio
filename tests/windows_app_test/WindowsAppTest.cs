@@ -16,7 +16,9 @@
 //    display and the sound in the MP4, a trimmed part, replacing an MP4,
 //    stopping, and a clip that turns out damaged part way; encoded by the GPU
 //    too, if this PC has an NVIDIA card; and for Discord: its bitrates, and
-//    exports fitting in their limit (or refused if they can't).
+//    exports fitting in their limit (or refused if they can't);
+//  - all of that for clips with screens (both screens, frames of what changed,
+//    entries that are only read): see ScreensTest.cs.
 //
 // usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>
 // It writes its clips in the current folder.
@@ -29,7 +31,7 @@ using System.Text;
 using System.Threading;
 using FlashbackStudio;
 
-static class WindowsAppTest
+static partial class WindowsAppTest
 {
     const int Fps = 30;
     const long RateMhz = 32728498;
@@ -64,7 +66,7 @@ static class WindowsAppTest
 
     // ---- Writing clips
 
-    sealed class Spec
+    class Spec
     {
         public int Width = 8, Height = 6;
         public int[] Copies;            // each entry's
@@ -155,7 +157,7 @@ static class WindowsAppTest
         {
             byte b = ops[i++];
             counts[0][b]++;
-            for (int k = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0; k > 0; k--)
+            for (int k = After(ops, i, b); k > 0; k--)
                 counts[1][ops[i++]]++;
         }
         List<byte> o = new List<byte> { 0xFF, 1, 0, 0 };
@@ -195,7 +197,7 @@ static class WindowsAppTest
         {
             byte b = ops[i++];
             Put(codes[0][b]);
-            for (int k = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0; k > 0; k--)
+            for (int k = After(ops, i, b); k > 0; k--)
                 Put(codes[1][ops[i++]]);
         }
         if (have > 0)
@@ -511,7 +513,7 @@ static class WindowsAppTest
         Damaged("an entry shown 0 times", p => Patch32(p, index + 16 + 8, 0), "frame entry 1 is damaged");
         Damaged("frames miscounted", p => Patch32(p, -16, d.Frames + 1), "the clip's frame count doesn't match its index");
         Damaged("a frame's data cut short", p => Patch32(p, index + 16 + 4, Stored(d, 1).Length - 1), "frame 1 is damaged");
-        Damaged("the codes' flag and a newer one", p => Patch32(p, -44, 3 | 0x300),
+        Damaged("the codes' flag and a newer one", p => Patch32(p, -44, 3 | 0x500),
                 "made by a newer Flashback version; get the latest Flashback Studio");
 
         // A frame packed with codes, damaged (its format, or its count of bytes)
@@ -1341,10 +1343,14 @@ static class WindowsAppTest
             return 2;
         }
         TestReader();
+        TestScreens();
         Console.WriteLine($"{checks} clips checked");
         int compared = checks;
         TestCompactor(Path.GetFullPath(args[1]));
         Console.WriteLine($"{checks - compared} compacted and trimmed clips compared with the 3DS app's");
+        compared = checks;
+        TestScreensCompactor(Path.GetFullPath(args[1]));
+        Console.WriteLine($"{checks - compared} compacted and trimmed clips with screens checked");
         TestOverlay(Path.GetFullPath(args[0]));
         TestInputLayout();
         TestDiscordBitrates();
@@ -1355,6 +1361,7 @@ static class WindowsAppTest
         {
             int before = checks;
             TestConversions(ffmpeg);
+            TestScreensConversions(ffmpeg);
             Console.WriteLine($"{checks - before} exports checked, with {ffmpeg}");
         }
         Console.WriteLine($"{(errors != 0 ? "FAILED" : "all good")} ({errors} errors)");

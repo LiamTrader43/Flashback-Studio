@@ -24,6 +24,15 @@ namespace FlashbackStudio
     // and the inputs, are described in 3ds-app/source/flb.h; this follows flb.c,
     // with the same checks and messages.
     //
+    // Clips with screens (VersionScreens in the version) are read here too. An
+    // index entry of theirs holds what's new at one moment: the top screen's
+    // frame, the bottom screen's (if the clip has one), or both; a screen it
+    // has nothing for is as it was after the entry before. A frame is whole,
+    // or what changed since the frame before it on the same screen (see
+    // DecodeDeltaOps), so a screen's picture at an entry takes its frames from
+    // its last whole one on: Show does that. Entries shown 0 times are only
+    // read, for the frames after them.
+    //
     // It also reads clips saved by older Flashback builds: raw RGB565 frames back
     // to back in a .raw, with a .txt next to it saying their resolution and frame
     // rate. They play and export like the others (as if each frame were an index
@@ -37,23 +46,43 @@ namespace FlashbackStudio
         public const int InputHeaderSize = 16;
         public const int InputRecordSize = 16;
         public const uint VersionCodes = 0x100;    // added to the version: frames may be packed with Huffman codes
+        public const uint VersionScreens = 0x200;  // ...and: its entries hold what's new on each screen (see above)
+
+        // How an entry's frames are stored (its Flags), in a clip with screens:
+        // as what changed since the frame before, and packed with Huffman codes.
+        public const int TopDelta = 1, TopCodes = 2, BottomDelta = 4, BottomCodes = 8;
 
         // A stored frame: where it is in the file, its size, how many times it's
         // shown, the clip frame it's first shown at, and (with sound) the sample
-        // it's first shown at.
+        // it's first shown at. In a clip with screens, Size is the top screen's
+        // frame's (0: the top screen is as it was), and the rest applies.
         public struct Entry
         {
             public long Offset;
             public int Size, Copies, FirstFrame;
             public long AudioPos;
+            public int BottomSize;      // the bottom screen's frame's size (0: it's as it was, or there's none)
+            public int Flags;           // TopDelta, ...
+            public int Missed;          // how many of Copies are missed frames (before screens: all but the first)
+
+            // Where the bottom screen's frame is: after the top screen's, from the next multiple of 4.
+            public long BottomOffset => Offset + ((Size + 3) & ~3);
+            // How much the entry stores, from Offset.
+            public int StoredSize => BottomSize != 0 ? ((Size + 3) & ~3) + BottomSize : Size;
         }
 
         public string Path { get; }
         public bool IsRaw { get; private set; }         // an older .raw clip
         public uint Version { get; private set; }       // 1: as recorded, 2: compacted, 3: with sound (either)
         public bool HasCodes { get; private set; }      // frames may be packed with Huffman codes (VersionCodes)
-        public int Width { get; private set; }
+        public bool HasScreens { get; private set; }    // its entries hold what's new on each screen (VersionScreens)
+        public int Width { get; private set; }          // the top screen's frames
         public int Height { get; private set; }
+        public int BottomWidth { get; private set; }    // the bottom screen's (0: the clip has none)
+        public int BottomHeight { get; private set; }
+        public bool HasBottom => BottomWidth != 0;
+        public int BottomBytes => BottomWidth * BottomHeight * 2;
+        public int MissedFrames { get; private set; }   // frames that are copies because their capture was missed
         public int Fps { get; private set; }
         public long SlotStride { get; private set; }    // bytes between ring slots (0 once compacted)
         public int SlotBytes { get; private set; }      // the size of an uncompressed frame
@@ -68,9 +97,13 @@ namespace FlashbackStudio
         public bool IsCompacted => Version == 2 || (Version == 3 && SlotStride == 0);
         public int EntryCount => entries.Length;
         public Entry this[int e] => entries[e];
+        // The sample at which the clip's first frame is shown (its first entry's,
+        // or after entries that are only read, the first one shown).
+        public long FirstAudioPos => entries[EntryForFrame(0)].AudioPos;
 
         readonly FileStream file;
         Entry[] entries;            // the stored frames, oldest first
+        int[] topKey, bottomKey;    // (with screens) the last entry up to each with that screen's frame whole, or -1
         long audioOffset, audioCapacity, audioFirst, audioEnd;
 
         FlbClip(string path)
@@ -145,22 +178,30 @@ namespace FlashbackStudio
             ReadAt(length - TrailerSize, t, 0, TrailerSize);
             if (U32(t, 0) != Magic)
                 throw new InvalidDataException("not a Flashback clip (or the copy is incomplete)");
-            uint version = U32(t, 4) & ~VersionCodes;
+            uint version = U32(t, 4) & ~(VersionCodes | VersionScreens);
             if (version < 1 || version > 3)
                 throw new InvalidDataException("made by a newer Flashback version; get the latest Flashback Studio");
-            int entrySize = version == 3 ? 16 : 12;
+            bool screens = (U32(t, 4) & VersionScreens) != 0;
+            int entrySize = screens ? 24 : version == 3 ? 16 : 12;
             int audioInfoSize = version == 3 ? AudioInfoSize : 0;
 
             uint width = U32(t, 8), height = U32(t, 12), fps = U32(t, 16);
             long stride = U32(t, 20);
             uint slotBytes = U32(t, 24), entryCount = U32(t, 28), frameCount = U32(t, 32);
             long indexOffset = U32(t, 36), inputOffset = U32(t, 40);
+            // (With screens, the trailer's last word is the bottom screen's size, or 0.)
+            uint bottomWidth = screens ? U32(t, 44) & 0xFFFF : 0, bottomHeight = screens ? U32(t, 44) >> 16 : 0;
             if (width == 0 || height == 0 || width > 400 || height > 240 || slotBytes != width * height * 2 ||
                 fps == 0 || fps > 60 || (version == 1 && stride < slotBytes) || entryCount > length / 12 ||
-                indexOffset + entryCount * entrySize + audioInfoSize + TrailerSize != length)
+                indexOffset + entryCount * entrySize + audioInfoSize + TrailerSize != length ||
+                (bottomWidth == 0) != (bottomHeight == 0) || bottomWidth > 320 || bottomHeight > 240 ||
+                bottomWidth > width || bottomHeight > height)
                 throw new InvalidDataException("the clip's header is damaged");
             Version = version;
             HasCodes = (U32(t, 4) & VersionCodes) != 0;
+            HasScreens = screens;
+            BottomWidth = (int)bottomWidth;
+            BottomHeight = (int)bottomHeight;
             Width = (int)width;
             Height = (int)height;
             Fps = (int)fps;
@@ -189,8 +230,37 @@ namespace FlashbackStudio
             }
 
             entries = new Entry[entryCount];
-            long frames = 0;
-            for (int e = 0; e < entryCount; e++)
+            long frames = 0, missedFrames = 0;
+            for (int e = 0; e < entryCount && screens; e++)
+            {
+                // With screens: its offset, each screen's frame's size (the bottom
+                // screen's after the top screen's), how many times it's shown (0:
+                // only read), its sound, and how its frames are stored (the low 8
+                // bits), with how many of its copies are missed frames above that
+                // (all but the first, at most; as flb.c takes them).
+                int p = e * entrySize;
+                long offset = U32(index, p);
+                uint top = U32(index, p + 4), bottom = U32(index, p + 8), copies = U32(index, p + 12), flags = U32(index, p + 20);
+                uint missed = Math.Min(flags >> 16, copies == 0 ? 0 : copies - 1);
+                long stored = bottom != 0 ? ((top + 3) & ~3u) + bottom : top;
+                if (top > slotBytes || bottom > bottomWidth * bottomHeight * 2 || copies > frameCount - frames ||
+                    offset + stored > indexOffset)
+                    throw new InvalidDataException($"frame entry {e} is damaged");
+                entries[e] = new Entry
+                {
+                    Offset = offset,
+                    Size = (int)top,
+                    BottomSize = (int)bottom,
+                    Copies = (int)copies,
+                    FirstFrame = (int)frames,
+                    AudioPos = HasAudio ? U32(index, p + 16) : 0,
+                    Flags = (int)(flags & 0xFF),
+                    Missed = (int)missed,
+                };
+                frames += copies;
+                missedFrames += missed;
+            }
+            for (int e = 0; e < entryCount && !screens; e++)
             {
                 long where = U32(index, e * entrySize);     // version 1: ring slot, versions 2 and 3: offset
                 long offset = version == 1 ? where * stride : where;
@@ -205,11 +275,29 @@ namespace FlashbackStudio
                     Copies = (int)copies,
                     FirstFrame = (int)frames,
                     AudioPos = HasAudio ? U32(index, e * entrySize + 12) : 0,
+                    Missed = (int)copies - 1,
                 };
                 frames += copies;
+                missedFrames += copies - 1;
             }
-            if (frames != frameCount || entryCount == 0)
+            if (frames != frameCount || entryCount == 0 || frameCount == 0)
                 throw new InvalidDataException("the clip's frame count doesn't match its index");
+            MissedFrames = (int)missedFrames;
+
+            if (screens)
+            {
+                topKey = new int[entryCount];
+                bottomKey = new int[entryCount];
+                for (int e = 0, top = -1, bottom = -1; e < entryCount; e++)
+                {
+                    if (entries[e].Size != 0 && (entries[e].Flags & TopDelta) == 0)
+                        top = e;
+                    if (entries[e].BottomSize != 0 && (entries[e].Flags & BottomDelta) == 0)
+                        bottom = e;
+                    topKey[e] = top;
+                    bottomKey[e] = bottom;
+                }
+            }
 
             Inputs = ReadInputs(inputOffset, indexOffset);
         }
@@ -294,6 +382,8 @@ namespace FlashbackStudio
                 if (p >= len)
                     return false;
                 int b = src[p++];
+                if (b == 0xFF)
+                    return false;   // (SKIP: only in frames stored as what changed)
                 if (b == 0xFE)
                 {
                     if (len - p < 2)
@@ -345,6 +435,103 @@ namespace FlashbackStudio
             return p == len;
         }
 
+        // A frame stored as what changed since the frame before it on the same
+        // screen (flashbackCompressDelta in flashback_compress.c): the same ops,
+        // and SKIP (0xFF n: the next n + 1 pixels stay as they are, or 0xFF 0xFF
+        // lo hi: the next (lo | hi << 8) + 1), after which the previous pixel
+        // is the last one skipped. Its pixels come in the screen's own order
+        // rather than upright: column by column, left to right, each from the
+        // bottom row up. 'dst' (w x h, upright) holds the frame before, and
+        // becomes this one. Returns false if the data is malformed (leaving
+        // 'dst' part changed).
+        static bool DecodeDeltaOps(byte[] src, int len, ushort[] dst, int w, int h)
+        {
+            ushort[] index = new ushort[64];
+            ushort px = 0;
+            int p = 0, i = 0, pixels = w * h;
+            int at = (h - 1) * w, left = h;     // where the next pixel goes, and how many are left in its column
+            while (i < pixels)
+            {
+                if (p >= len)
+                    return false;
+                int b = src[p++];
+                if (b == 0xFF)
+                {
+                    if (p >= len)
+                        return false;
+                    int count = src[p++];
+                    if (count == 0xFF)
+                    {
+                        if (len - p < 2)
+                            return false;
+                        count = src[p] | (src[p + 1] << 8);
+                        p += 2;
+                    }
+                    count++;
+                    if (count > pixels - i)
+                        return false;
+                    i += count;
+                    px = dst[(h - 1 - (i - 1) % h) * w + (i - 1) / h];
+                    at = (h - 1 - i % h) * w + i / h;
+                    left = h - i % h;
+                    continue;
+                }
+                int run = 1;
+                if (b == 0xFE)
+                {
+                    if (len - p < 2)
+                        return false;
+                    px = (ushort)(src[p] | (src[p + 1] << 8));
+                    p += 2;
+                    index[(int)(unchecked((uint)px * 0x9E3779B1u) >> 26)] = px;
+                }
+                else if ((b & 0xC0) == 0xC0)
+                {
+                    run = (b & 0x3F) + 1;
+                    if (run > pixels - i)
+                        return false;
+                }
+                else if ((b & 0xC0) == 0x00)
+                    px = index[b];
+                else
+                {
+                    int dr, dg, db;
+                    if ((b & 0xC0) == 0x40)
+                    {
+                        dr = ((b >> 4) & 3) - 2;
+                        dg = ((b >> 2) & 3) - 2;
+                        db = (b & 3) - 2;
+                    }
+                    else
+                    {
+                        if (p >= len)
+                            return false;
+                        int b2 = src[p++];
+                        dg = (b & 0x3F) - 32;
+                        dr = ((b2 >> 4) - 8) + (dg >> 1);
+                        db = ((b2 & 0xF) - 8) + (dg >> 1);
+                    }
+                    int r = ((px >> 11) + dr) & 0x1F;
+                    int g = (((px >> 5) & 0x3F) + dg) & 0x3F;
+                    int bl = ((px & 0x1F) + db) & 0x1F;
+                    px = (ushort)((r << 11) | (g << 5) | bl);
+                    index[(int)(unchecked((uint)px * 0x9E3779B1u) >> 26)] = px;
+                }
+                for (i += run; run > 0; run--)
+                {
+                    dst[at] = px;
+                    at -= w;
+                    if (--left == 0)
+                    {
+                        // (On to the next column's bottom row.)
+                        left = h;
+                        at += h * w + 1;
+                    }
+                }
+            }
+            return p == len;
+        }
+
         const int CodesHeader = 264;    // a frame packed with Huffman codes: bytes before the codes
         const int CodeBits = 12;        // the longest code
 
@@ -358,7 +545,7 @@ namespace FlashbackStudio
         bool DecodeCodes(byte[] src, int len, int cap, out int count)
         {
             count = 0;
-            if (len < CodesHeader || src[1] != 1)
+            if (len < CodesHeader || src[0] != 0xFF || src[1] != 1)
                 return false;
             uint n = U32(src, 4);
             if (n > cap)
@@ -366,7 +553,7 @@ namespace FlashbackStudio
             if (codeTables == null)
             {
                 codeTables = new[] { new ushort[1 << CodeBits], new ushort[1 << CodeBits] };
-                codedBytes = new byte[SlotBytes];
+                codedBytes = new byte[Math.Max(SlotBytes, BottomBytes)];
             }
 
             // Each set's codes by their next CodeBits bits (first bit lowest): byte
@@ -407,8 +594,10 @@ namespace FlashbackStudio
             }
 
             // The bytes, each set's codes in turn: an op byte, then the bytes after
-            // it (LUMA's second, RAW's two).
+            // it (LUMA's second, RAW's two, SKIP's count: one, or three if the
+            // first is 0xFF).
             int pos = CodesHeader, have = 0, after = 0;
+            bool skipCount = false;     // the next byte is the first after a SKIP
             uint bits = 0;
             for (int i = 0; i < n; i++)
             {
@@ -426,9 +615,17 @@ namespace FlashbackStudio
                 byte b = (byte)e;
                 codedBytes[i] = b;
                 if (after != 0)
+                {
                     after--;
+                    if (skipCount && b == 0xFF)
+                        after += 2;
+                    skipCount = false;
+                }
                 else
-                    after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0;
+                {
+                    after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : b == 0xFF ? 1 : 0;
+                    skipCount = b == 0xFF;
+                }
             }
             // (The codes must end in the frame's last 2 bytes: it's padded to 2.)
             long usedBits = (long)(pos - CodesHeader) * 8 - have, heldBits = (long)(len - CodesHeader) * 8;
@@ -447,18 +644,55 @@ namespace FlashbackStudio
             return DecodeOps(src, len, dst, pixels);
         }
 
-        byte[] stored;      // (DecodeEntry's)
-
-        // Reads entry 'e' as it's stored in the file (into 'buf', at least its Size long).
-        public void ReadStored(int e, byte[] buf)
+        // A stored frame (not stored raw) of a w x h screen in a clip with
+        // screens, as flbDecodeFrame in flb.c: packed with Huffman codes if
+        // 'coded', and what changed since the frame before, which 'dst' holds,
+        // if 'delta'.
+        bool DecodeFrame(byte[] src, int len, ushort[] dst, int w, int h, bool delta, bool coded)
         {
-            ReadAt(entries[e].Offset, buf, 0, entries[e].Size);
+            if (coded)
+            {
+                if (!DecodeCodes(src, len, w * h * 2, out int count))
+                    return false;
+                src = codedBytes;
+                len = count;
+            }
+            return delta ? DecodeDeltaOps(src, len, dst, w, h) : DecodeOps(src, len, dst, w * h);
         }
 
+        byte[] stored;      // (DecodeEntry's and Show's)
+
+        // Reads entry 'e' as it's stored in the file, into 'buf' (at least its
+        // StoredSize long): its frame, or in a clip with screens, the top
+        // screen's, then zeros up to a multiple of 4 and the bottom screen's
+        // (if it has both).
+        public void ReadStored(int e, byte[] buf)
+        {
+            Entry entry = entries[e];
+            ReadAt(entry.Offset, buf, 0, entry.Size);
+            if (entry.BottomSize != 0)
+            {
+                int at = (entry.Size + 3) & ~3;
+                Array.Clear(buf, entry.Size, at - entry.Size);
+                ReadAt(entry.BottomOffset, buf, at, entry.BottomSize);
+            }
+        }
+
+        Pictures seeking;   // (DecodeEntry's, in a clip with screens)
+
         // Reads and decodes entry 'e' into 'dst' (Width * Height pixels, RGB565,
-        // top row first).
+        // top row first): in a clip with screens, the top screen's picture
+        // after it (see Show).
         public void DecodeEntry(int e, ushort[] dst)
         {
+            if (HasScreens)
+            {
+                if (seeking == null)
+                    seeking = NewPictures(false);
+                Show(seeking, e);
+                Array.Copy(seeking.Top, dst, Width * Height);
+                return;
+            }
             if (stored == null)
                 stored = new byte[SlotBytes];
             ReadStored(e, stored);
@@ -466,6 +700,80 @@ namespace FlashbackStudio
                 Buffer.BlockCopy(stored, 0, dst, 0, SlotBytes);
             else if (!Decompress(stored, entries[e].Size, dst, Width * Height))
                 throw new InvalidDataException($"frame {e} is damaged");
+        }
+
+        // Both screens' pictures after an index entry (RGB565, top row first):
+        // what a reader of the clip has on screen. Show moves it to another entry.
+        public sealed class Pictures
+        {
+            public readonly ushort[] Top;       // Width x Height
+            public readonly ushort[] Bottom;    // BottomWidth x BottomHeight; null without a bottom screen (or if it isn't wanted)
+            public int Entry = -1;              // the entry they're after (-1: none yet)
+
+            internal Pictures(FlbClip clip, bool bottom)
+            {
+                Top = new ushort[clip.Width * clip.Height];
+                Bottom = bottom && clip.HasBottom ? new ushort[clip.BottomWidth * clip.BottomHeight] : null;
+            }
+        }
+
+        // The last entry up to 'e' with a whole frame for the top screen (or the
+        // bottom screen, if 'bottom'), in a clip with screens; -1 if there's none.
+        public int WholeUpTo(int e, bool bottom) => bottom ? bottomKey[e] : topKey[e];
+
+        // Pictures to Show entries in (without the bottom screen's, if 'bottom' is false).
+        public Pictures NewPictures(bool bottom = true) => new Pictures(this, bottom);
+
+        // Makes 'at' the pictures after entry 'e'. In a clip with screens, each
+        // screen's frames are applied from where 'at' is, if that's before 'e'
+        // and at or after the screen's last whole frame up to 'e'; otherwise
+        // from that whole frame. A screen with no whole frame yet is black
+        // (frames of what changed, before it, are ignored). If a frame is
+        // damaged it throws, and 'at' is after no entry.
+        public void Show(Pictures at, int e)
+        {
+            if (at.Entry == e)
+                return;
+            int from = at.Entry;
+            at.Entry = -1;
+            if (!HasScreens)
+                DecodeEntry(e, at.Top);
+            else
+            {
+                ShowScreen(at.Top, false, from, e);
+                if (at.Bottom != null)
+                    ShowScreen(at.Bottom, true, from, e);
+            }
+            at.Entry = e;
+        }
+
+        // One screen's picture after entry 'e', in 'dst', which holds it as it
+        // is after entry 'from' (-1: nothing).
+        void ShowScreen(ushort[] dst, bool bottom, int from, int e)
+        {
+            int key = bottom ? bottomKey[e] : topKey[e];
+            if (key < 0)
+            {
+                Array.Clear(dst, 0, dst.Length);
+                return;
+            }
+            int w = bottom ? BottomWidth : Width, h = bottom ? BottomHeight : Height;
+            if (stored == null)
+                stored = new byte[Math.Max(SlotBytes, BottomBytes)];
+            for (int i = from >= key && from < e ? from + 1 : key; i <= e; i++)
+            {
+                Entry entry = entries[i];
+                int size = bottom ? entry.BottomSize : entry.Size;
+                if (size == 0)
+                    continue;
+                bool delta = (entry.Flags & (bottom ? BottomDelta : TopDelta)) != 0;
+                bool coded = (entry.Flags & (bottom ? BottomCodes : TopCodes)) != 0;
+                ReadAt(bottom ? entry.BottomOffset : entry.Offset, stored, 0, size);
+                if (size == w * h * 2 && !delta)
+                    Buffer.BlockCopy(stored, 0, dst, 0, size);
+                else if (!DecodeFrame(stored, size, dst, w, h, delta, coded))
+                    throw new InvalidDataException($"frame {i} is damaged");
+            }
         }
 
         // The index entry shown at clip frame 'frame' (0 .. FrameCount - 1).
@@ -485,16 +793,27 @@ namespace FlashbackStudio
 
         // Frames firstFrame .. firstFrame + frameCount - 1, in order: each stored
         // frame's pixels (RGB565, top row first; the same array each time) and
-        // how many of those frames it's shown for.
+        // how many of those frames it's shown for. (The top screen's, in a clip
+        // with screens: the same pixels again where only the bottom screen changed.)
         public IEnumerable<(ushort[] Pixels, int Copies)> Frames(int firstFrame, int frameCount)
         {
-            ushort[] frame = new ushort[Width * Height];
+            foreach ((ushort[] top, ushort[] bottom, int copies) in Moments(firstFrame, frameCount, false))
+                yield return (top, copies);
+        }
+
+        // The same, with the bottom screen's pixels too if 'bottom' (and the clip
+        // has one; null otherwise): each index entry's pictures, the same arrays
+        // each time.
+        public IEnumerable<(ushort[] Top, ushort[] Bottom, int Copies)> Moments(int firstFrame, int frameCount, bool bottom = true)
+        {
+            Pictures at = NewPictures(bottom);
             int end = firstFrame + frameCount;
             for (int e = EntryForFrame(firstFrame); e < entries.Length && entries[e].FirstFrame < end; e++)
             {
-                DecodeEntry(e, frame);
+                Show(at, e);
                 int from = Math.Max(entries[e].FirstFrame, firstFrame), to = Math.Min(entries[e].FirstFrame + entries[e].Copies, end);
-                yield return (frame, to - from);
+                if (to > from)
+                    yield return (at.Top, at.Bottom, to - from);
             }
         }
 

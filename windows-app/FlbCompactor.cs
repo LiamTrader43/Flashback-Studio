@@ -11,6 +11,15 @@ namespace FlashbackStudio
     // itself is only touched at the very end of a compaction, and is left as it
     // was if anything fails or it's cancelled.
     //
+    // A clip with screens (FlbClip.HasScreens) keeps its kind of index. Each
+    // entry's data is copied as the top screen's frame, then (if it has both)
+    // zeros up to a multiple of 4 and the bottom screen's. Compacting keeps
+    // every entry, the ones that are only read included. A trimmed clip starts
+    // with the entries a reader needs to make out its first frame: from the
+    // last one, up to that frame's, with a whole frame for the top screen, or
+    // for the bottom screen if that's earlier. They're kept as entries shown 0
+    // times. Where an entry's copies are cut, so are its missed frames.
+    //
     // Failures throw InvalidDataException, with flb.c's messages.
     sealed class FlbCompactor
     {
@@ -21,7 +30,7 @@ namespace FlashbackStudio
         FlbClip clip;
         FileStream output;
         readonly int firstFrame, frameCount;        // the frames copied
-        readonly int firstEntry, endEntry;          // the index entries they use
+        readonly int firstEntry, endEntry;          // the index entries they use (with screens: and the ones read before them)
         readonly long[] offsets;                    // each copied entry's offset in the copy
         int next;                                   // the next entry to copy
         readonly long audioStart, audioCount;       // the sound track: copied after the frames
@@ -31,41 +40,60 @@ namespace FlashbackStudio
         public long Copied { get; private set; }    // bytes copied so far...
         public long Total { get; }                  // ...and in all
 
-        static int EntrySize(FlbClip c) => c.HasAudio ? 16 : 12;
+        static int EntrySize(FlbClip c) => c.HasScreens ? 24 : c.HasAudio ? 16 : 12;
         static int AudioInfoSize(FlbClip c) => c.HasAudio ? FlbClip.AudioInfoSize : 0;
         static long InputsSize(FlbClip c, int frames) =>
             c.Inputs != null ? FlbClip.InputHeaderSize + (long)frames * FlbClip.InputRecordSize : 0;
 
         // The index entries frames firstFrame .. firstFrame + frameCount - 1 use.
-        static void EntryRange(FlbClip c, int firstFrame, int frameCount, out int first, out int end)
+        // With screens: every entry if it's 'all' of the clip (compacting); and
+        // otherwise also the ones a reader needs before the first frame's (see
+        // the top).
+        static void EntryRange(FlbClip c, int firstFrame, int frameCount, bool all, out int first, out int end)
         {
             first = c.EntryForFrame(firstFrame);
             end = c.EntryForFrame(firstFrame + frameCount - 1) + 1;
+            if (!c.HasScreens)
+                return;
+            if (all)
+            {
+                first = 0;
+                end = c.EntryCount;
+                return;
+            }
+            int top = c.WholeUpTo(first, false), bottom = c.HasBottom ? c.WholeUpTo(first, true) : -1;
+            if (top >= 0)
+                first = top;
+            if (bottom >= 0 && bottom < first)
+                first = bottom;
         }
 
         // How many of those frames entry 'e' is shown for (fewer than its copies
-        // if the range starts or ends part way through them).
+        // if the range starts or ends part way through them; none, for an entry
+        // that's only read).
         static int CopiesIn(FlbClip c, int e, int firstFrame, int frameCount)
         {
             FlbClip.Entry entry = c[e];
             int from = Math.Max(entry.FirstFrame, firstFrame), to = Math.Min(entry.FirstFrame + entry.Copies, firstFrame + frameCount);
-            return to - from;
+            return Math.Max(0, to - from);
         }
 
         // The size of frames firstFrame .. firstFrame + frameCount - 1 of a clip, trimmed (as a compacted clip).
-        public static long TrimSize(FlbClip c, int firstFrame, int frameCount)
+        public static long TrimSize(FlbClip c, int firstFrame, int frameCount) => CopySize(c, firstFrame, frameCount, false);
+
+        // The size of a clip once compacted.
+        public static long CompactSize(FlbClip c) => CopySize(c, 0, c.FrameCount, true);
+
+        static long CopySize(FlbClip c, int firstFrame, int frameCount, bool all)
         {
-            EntryRange(c, firstFrame, frameCount, out int first, out int end);
+            EntryRange(c, firstFrame, frameCount, all, out int first, out int end);
             long size = (long)(end - first) * EntrySize(c) + AudioInfoSize(c) + FlbClip.TrailerSize + InputsSize(c, frameCount);
             for (int e = first; e < end; e++)
-                size += c[e].Size;
+                size += c[e].StoredSize;
             if (c.HasAudio)
                 size += c.AudioSamplesIn(frameCount) * 4;
             return size;
         }
-
-        // The size of a clip once compacted.
-        public static long CompactSize(FlbClip c) => TrimSize(c, 0, c.FrameCount);
 
         // Starts compacting the clip at 'path'.
         public static FlbCompactor Compact(string path) => new FlbCompactor(path, path, 0, -1);
@@ -101,7 +129,7 @@ namespace FlashbackStudio
                     throw new InvalidDataException("those frames aren't in the clip");
                 this.firstFrame = firstFrame;
                 this.frameCount = frameCount;
-                EntryRange(clip, firstFrame, frameCount, out firstEntry, out endEntry);
+                EntryRange(clip, firstFrame, frameCount, Compacting, out firstEntry, out endEntry);
                 next = firstEntry;
 
                 // Just the sound the frames last, from where the first one's starts
@@ -113,11 +141,11 @@ namespace FlashbackStudio
                     audioStart = clip.AudioPosOf(firstFrame);
                     audioCount = clip.AudioSamplesIn(frameCount);
                 }
-                long size = TrimSize(clip, firstFrame, frameCount);
+                long size = CopySize(clip, firstFrame, frameCount, Compacting);
                 Total = size - (long)(endEntry - firstEntry) * EntrySize(clip) - AudioInfoSize(clip) - FlbClip.TrailerSize -
                         InputsSize(clip, frameCount);
                 offsets = new long[endEntry - firstEntry];
-                stored = new byte[clip.SlotBytes];
+                stored = new byte[((clip.SlotBytes + 3) & ~3) + clip.BottomBytes];
 
                 // A trimmed clip is a new one: never write over another.
                 if (!Compacting && File.Exists(outPath))
@@ -204,9 +232,9 @@ namespace FlashbackStudio
                 {
                     FlbClip.Entry e = clip[next];
                     clip.ReadStored(next, stored);
-                    Put(stored, e.Size);
+                    Put(stored, e.StoredSize);
                     offsets[next++ - firstEntry] = Copied;
-                    Copied += e.Size;
+                    Copied += e.StoredSize;
                     return false;
                 }
                 if (audioDone < audioCount)
@@ -271,17 +299,27 @@ namespace FlashbackStudio
             {
                 int e = firstEntry + i, p = index + i * entrySize;
                 FlbClip.Entry entry = clip[e];
+                int copies = CopiesIn(clip, e, firstFrame, frameCount);
+                // The copy's sound starts at its first frame, and its first
+                // entry may be kept from part way through its copies.
+                int skipped = entry.FirstFrame < firstFrame ? firstFrame - entry.FirstFrame : 0;
+                long pos = entry.AudioPos + clip.AudioOffsetOf(skipped);
                 Put32(tail, p, offsets[i]);
                 Put32(tail, p + 4, entry.Size);
-                Put32(tail, p + 8, CopiesIn(clip, e, firstFrame, frameCount));
-                if (clip.HasAudio)
+                if (clip.HasScreens)
                 {
-                    // The copy's sound starts at its first frame, and its first
-                    // entry may be kept from part way through its copies.
-                    int skipped = entry.FirstFrame < firstFrame ? firstFrame - entry.FirstFrame : 0;
-                    long pos = entry.AudioPos + clip.AudioOffsetOf(skipped);
-                    Put32(tail, p + 12, pos > audioStart ? pos - audioStart : 0);
+                    // (An entry that's only read has no sound of its own, and no
+                    // missed frames; one with fewer copies now, at most as many
+                    // missed frames as it has copies of its first.)
+                    Put32(tail, p + 8, entry.BottomSize);
+                    Put32(tail, p + 12, copies);
+                    Put32(tail, p + 16, clip.HasAudio && copies != 0 && pos > audioStart ? pos - audioStart : 0);
+                    Put32(tail, p + 20, (uint)entry.Flags | (uint)(copies == 0 ? 0 : Math.Min(entry.Missed, copies - 1)) << 16);
+                    continue;
                 }
+                Put32(tail, p + 8, copies);
+                if (clip.HasAudio)
+                    Put32(tail, p + 12, pos > audioStart ? pos - audioStart : 0);
             }
             if (clip.HasAudio)
             {
@@ -297,7 +335,8 @@ namespace FlashbackStudio
             }
             int t = index + indexSize;
             Put32(tail, t, Magic);
-            Put32(tail, t + 4, (clip.HasAudio ? 3u : 2u) | (clip.HasCodes ? FlbClip.VersionCodes : 0u));
+            Put32(tail, t + 4, (clip.HasAudio ? 3u : 2u) | (clip.HasCodes ? FlbClip.VersionCodes : 0u) |
+                               (clip.HasScreens ? FlbClip.VersionScreens : 0u));
             Put32(tail, t + 8, clip.Width);
             Put32(tail, t + 12, clip.Height);
             Put32(tail, t + 16, clip.Fps);
@@ -307,6 +346,8 @@ namespace FlashbackStudio
             Put32(tail, t + 32, frameCount);
             Put32(tail, t + 36, Copied + inputSize);
             Put32(tail, t + 40, inputOffset);
+            if (clip.HasScreens)
+                Put32(tail, t + 44, (uint)clip.BottomWidth | (uint)clip.BottomHeight << 16);
 
             Put(tail, tail.Length);
             Copied += inputSize;

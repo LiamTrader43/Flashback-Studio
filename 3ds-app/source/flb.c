@@ -24,7 +24,7 @@
 // fixed cost, so fewer, bigger, aligned writes are faster.
 #define FLB_COMPACT_BUFFER  (512 * 1024)
 
-// SD card sector size: frames are read in whole sectors (see flbDecodeEntry).
+// SD card sector size: frames are read in whole sectors (see flbReadStored).
 #define FLB_SECTOR          512
 
 static char g_error[96];
@@ -55,12 +55,32 @@ static void flbPut16(uint8_t *p, uint16_t v)
 
 static uint32_t flbEntrySize(const FlbInfo *info)
 {
-    return info->version == FLB_VERSION_AUDIO ? 16 : 12;
+    return info->hasScreens ? 24 : info->version == FLB_VERSION_AUDIO ? 16 : 12;
 }
 
 static uint32_t flbAudioInfoSize(const FlbInfo *info)
 {
     return info->version == FLB_VERSION_AUDIO ? FLB_AUDIO_INFO_SIZE : 0;
+}
+
+// The size of an uncompressed frame of screen 's'.
+static uint32_t flbScreenBytes(const FlbInfo *info, int s)
+{
+    return s == FLB_TOP ? info->slotBytes : info->bottomWidth * info->bottomHeight * 2;
+}
+
+// Where the bottom screen's frame starts in an entry's stored data: at the
+// next multiple of 4 bytes after the top screen's.
+static uint32_t flbBottomAt(const FlbEntry *entry)
+{
+    return (entry->size + 3) & ~3u;
+}
+
+// How many bytes an entry's stored data takes: the top screen's frame, and the
+// bottom screen's if it has one.
+static uint32_t flbEntryData(const FlbEntry *entry)
+{
+    return entry->bottomSize != 0 ? flbBottomAt(entry) + entry->bottomSize : entry->size;
 }
 
 // The size of the inputs of 'frames' frames of the clip, header included (0
@@ -120,8 +140,9 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
         return false;
     }
     memset(info, 0, sizeof(*info));
-    info->version = flbU32(t + 4) & ~FLB_VERSION_CODES;
+    info->version = flbU32(t + 4) & ~(uint32_t)(FLB_VERSION_CODES | FLB_VERSION_SCREENS);
     info->hasCodes = (flbU32(t + 4) & FLB_VERSION_CODES) != 0;
+    info->hasScreens = (flbU32(t + 4) & FLB_VERSION_SCREENS) != 0;
     if (info->version < FLB_VERSION_RECORDED || info->version > FLB_VERSION_AUDIO)
     {
         *error = "made by a newer Flashback version; get the latest Flashback Studio";
@@ -138,10 +159,22 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
     info->indexOffset = flbU32(t + 36);
     info->inputOffset = flbU32(t + 40);
     info->fileSize = (uint64_t)length;
+    // (The bottom screen's size is only there with FLB_VERSION_SCREENS: the
+    // word wasn't used before.)
+    if (info->hasScreens)
+    {
+        info->bottomWidth = flbU32(t + 44) & 0xFFFF;
+        info->bottomHeight = flbU32(t + 44) >> 16;
+    }
+    // Missed frames: every copy, in the clips from before FLB_VERSION_SCREENS;
+    // since, the index says which copies are.
+    info->missedFrames = info->hasScreens ? UINT32_MAX :
+                         info->frameCount > info->entryCount ? info->frameCount - info->entryCount : 0;
 
     if (info->width == 0 || info->height == 0 || info->width > 400 || info->height > 240 ||
         info->slotBytes != info->width * info->height * 2 || info->fps == 0 || info->fps > 60 ||
         (info->version == FLB_VERSION_RECORDED && info->slotStride < info->slotBytes) ||
+        (info->bottomWidth == 0) != (info->bottomHeight == 0) || info->bottomWidth > 320 || info->bottomHeight > 240 ||
         info->entryCount > (uint64_t)length / 12 ||
         (uint64_t)info->indexOffset + (uint64_t)info->entryCount * flbEntrySize(info) + flbAudioInfoSize(info) +
             FLB_TRAILER_SIZE != info->fileSize)
@@ -153,7 +186,7 @@ bool flbReadInfo(FILE *file, FlbInfo *info, const char **error)
     if (info->version == FLB_VERSION_AUDIO)
     {
         uint8_t a[FLB_AUDIO_INFO_SIZE];
-        if (fseeko(file, (off_t)info->indexOffset + (off_t)info->entryCount * 16, SEEK_SET) != 0 ||
+        if (fseeko(file, (off_t)info->indexOffset + (off_t)info->entryCount * flbEntrySize(info), SEEK_SET) != 0 ||
             fread(a, 1, sizeof(a), file) != sizeof(a))
         {
             *error = "the file couldn't be read";
@@ -230,6 +263,7 @@ static void flbReadInputs(FlbClip *clip)
 bool flbOpen(FlbClip *clip, const char *path, const char **error)
 {
     memset(clip, 0, sizeof(*clip));
+    clip->at[FLB_TOP] = clip->at[FLB_BOTTOM] = UINT32_MAX;
     clip->file = fopen(path, "rb");
     if (clip->file == NULL)
     {
@@ -242,11 +276,13 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
     if (!flbReadInfo(clip->file, &clip->info, error))
         goto fail;
 
-    const FlbInfo *info = &clip->info;
-    uint32_t entrySize = flbEntrySize(info);
+    FlbInfo *info = &clip->info;
+    uint32_t entrySize = flbEntrySize(info), bottomBytes = flbScreenBytes(info, FLB_BOTTOM);
     uint8_t *index = malloc((size_t)info->entryCount * entrySize + 1);
     clip->entries = malloc((size_t)info->entryCount * sizeof(FlbEntry) + 1);
-    clip->stored = malloc(info->slotBytes + 2 * FLB_SECTOR);   // a frame, read in whole sectors
+    // An entry's frames, read in whole sectors: the top screen's, and the
+    // bottom screen's from the next multiple of 4 bytes.
+    clip->stored = malloc(info->slotBytes + 4 + bottomBytes + 2 * FLB_SECTOR);
     if (index == NULL || clip->entries == NULL || clip->stored == NULL)
     {
         free(index);
@@ -261,19 +297,46 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         goto fail;
     }
 
-    uint32_t frames = 0;
+    uint32_t frames = 0, missed = 0;
     for (uint32_t e = 0; e < info->entryCount; e++)
     {
         FlbEntry *entry = &clip->entries[e];
         const uint8_t *p = index + e * entrySize;
-        uint32_t where = flbU32(p);     // version 1: ring slot, versions 2 and 3: offset
-        uint64_t offset = info->version == FLB_VERSION_RECORDED ? (uint64_t)where * info->slotStride : where;
-        entry->size = flbU32(p + 4);
-        entry->copies = flbU32(p + 8);
-        entry->audioPos = info->hasAudio ? flbU32(p + 12) : 0;
+        uint64_t offset;
+        bool ok;
+        memset(entry, 0, sizeof(*entry));
+        if (info->hasScreens)
+        {
+            // (Either screen's frame can be left out, and an entry that's only
+            // read is shown 0 times.)
+            offset = flbU32(p);
+            entry->size = flbU32(p + 4);
+            entry->bottomSize = flbU32(p + 8);
+            entry->copies = flbU32(p + 12);
+            entry->audioPos = info->hasAudio ? flbU32(p + 16) : 0;
+            entry->flags = (uint8_t)flbU32(p + 20);
+            entry->missed = (uint16_t)(flbU32(p + 20) >> 16);
+            // (Its missed frames are copies after its first: never more than those.)
+            uint32_t most = entry->copies != 0 ? entry->copies - 1 : 0;
+            if (entry->missed > most)
+                entry->missed = (uint16_t)most;
+            ok = entry->size <= info->slotBytes && entry->bottomSize <= bottomBytes &&
+                 offset + flbEntryData(entry) <= info->indexOffset;
+        }
+        else
+        {
+            uint32_t where = flbU32(p);     // version 1: ring slot, versions 2 and 3: offset
+            offset = info->version == FLB_VERSION_RECORDED ? (uint64_t)where * info->slotStride : where;
+            entry->size = flbU32(p + 4);
+            entry->copies = flbU32(p + 8);
+            entry->audioPos = info->hasAudio ? flbU32(p + 12) : 0;
+            ok = entry->size != 0 && entry->size <= info->slotBytes && entry->copies != 0 &&
+                 offset + entry->size <= info->indexOffset;
+            // (Every copy after the first is a missed frame.)
+            entry->missed = (uint16_t)(entry->copies - 1 > 0xFFFF ? 0xFFFF : entry->copies - 1);
+        }
         entry->firstFrame = frames;
-        if (entry->size == 0 || entry->size > info->slotBytes || entry->copies == 0 ||
-            entry->copies > info->frameCount - frames || offset + entry->size > info->indexOffset)
+        if (!ok || entry->copies > info->frameCount - frames)
         {
             free(index);
             snprintf(g_error, sizeof(g_error), "frame entry %lu is damaged", (unsigned long)e);
@@ -282,13 +345,17 @@ bool flbOpen(FlbClip *clip, const char *path, const char **error)
         }
         entry->offset = (uint32_t)offset;
         frames += entry->copies;
+        missed += entry->missed;
     }
     free(index);
-    if (frames != info->frameCount || info->entryCount == 0)
+    if (frames != info->frameCount || info->entryCount == 0 || frames == 0)
     {
         *error = "the clip's frame count doesn't match its index";
         goto fail;
     }
+    if (info->hasScreens)
+        info->missedFrames = missed;
+    clip->firstShown = flbEntryForFrame(clip, 0);
     flbReadInputs(clip);
     return true;
 
@@ -305,9 +372,13 @@ void flbClose(FlbClip *clip)
     free(clip->stored);
     free(clip->inputs);
     free(clip->codes);
+    free(clip->picture[FLB_TOP]);
+    free(clip->picture[FLB_BOTTOM]);
     memset(clip, 0, sizeof(*clip));
 }
 
+// (Entries that are only read are shown at no frame: of the entries first
+// shown at the same frame, this finds the last, which is the one shown.)
 uint32_t flbEntryForFrame(const FlbClip *clip, uint32_t frame)
 {
     uint32_t lo = 0, hi = clip->info.entryCount - 1;
@@ -322,50 +393,227 @@ uint32_t flbEntryForFrame(const FlbClip *clip, uint32_t frame)
     return lo;
 }
 
-bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **error)
+// Reads 'size' bytes of the file from 'offset' into clip->stored, and returns
+// where they are in it (NULL if they can't be read). Reads start on a sector
+// of the SD card: a compacted clip's frames start anywhere in the file, and on
+// a 3DS a read that doesn't start on a sector is much slower (an Old 3DS played
+// compacted clips slower than recorded ones). So the whole sectors holding the
+// bytes are read. (The end of the last sector can be past the end of the file:
+// only the bytes themselves have to be there.)
+static const uint8_t *flbReadStored(FlbClip *clip, uint64_t offset, uint32_t size)
+{
+    uint32_t skip = (uint32_t)(offset % FLB_SECTOR);
+    uint32_t len = (skip + size + FLB_SECTOR - 1) / FLB_SECTOR * FLB_SECTOR;
+    if (fseeko(clip->file, (off_t)(offset - skip), SEEK_SET) != 0 ||
+        fread(clip->stored, 1, len, clip->file) < skip + size)
+        return NULL;
+    return clip->stored + skip;
+}
+
+// An entry's frame of a clip from before FLB_VERSION_SCREENS: each is whole.
+static bool flbDecodeWhole(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **error)
 {
     const FlbInfo *info = &clip->info;
     const FlbEntry *e = &clip->entries[entry];
     bool raw = e->size == info->slotBytes;
 
-    // Reads start on a sector of the SD card: a compacted clip's frames start
-    // anywhere in the file, and on a 3DS a read that doesn't start on a sector
-    // is much slower (an Old 3DS played compacted clips slower than recorded
-    // ones). So the whole sectors holding the frame are read, and the frame
-    // used from where it starts in them. (A recorded clip's frames start on a
-    // sector: frames stored as they are go straight to 'dst'.)
-    uint32_t skip = e->offset % FLB_SECTOR;
-    uint8_t *buf = raw && skip == 0 ? (uint8_t *)dst : clip->stored;
-    uint32_t len = raw && skip == 0 ? e->size : (skip + e->size + FLB_SECTOR - 1) / FLB_SECTOR * FLB_SECTOR;
-
-    // (The end of the last sector can be past the end of the file: only the
-    // frame itself has to be there.)
-    if (fseeko(clip->file, e->offset - skip, SEEK_SET) != 0 ||
-        fread(buf, 1, len, clip->file) < skip + e->size)
+    // (A recorded clip's frames start on a sector: frames stored as they are
+    // go straight to 'dst'.)
+    const uint8_t *data;
+    if (raw && e->offset % FLB_SECTOR == 0)
+    {
+        if (fseeko(clip->file, e->offset, SEEK_SET) != 0 || fread(dst, 1, e->size, clip->file) != e->size)
+        {
+            *error = "the file couldn't be read";
+            return false;
+        }
+        return true;
+    }
+    data = flbReadStored(clip, e->offset, e->size);
+    if (data == NULL)
     {
         *error = "the file couldn't be read";
         return false;
     }
     if (raw)
     {
-        if (buf != (uint8_t *)dst)
-            memcpy(dst, buf + skip, e->size);
+        memcpy(dst, data, e->size);
         return true;
     }
     // (Frames packed with Huffman codes are decoded through the clip's
     // FlbCodes, made for the first one.)
-    if (buf[skip] == 0xFF && clip->codes == NULL && (clip->codes = malloc(sizeof(FlbCodes))) == NULL)
+    if (data[0] == 0xFF && clip->codes == NULL && (clip->codes = malloc(sizeof(FlbCodes))) == NULL)
     {
         *error = "not enough memory for this clip";
         return false;
     }
-    if (!flbDecompress(buf + skip, e->size, dst, info->width * info->height, clip->codes))
+    if (!flbDecompress(data, e->size, dst, info->width * info->height, clip->codes))
     {
         snprintf(g_error, sizeof(g_error), "frame %lu is damaged", (unsigned long)entry);
         *error = g_error;
         return false;
     }
     return true;
+}
+
+// Whether entry 'e' has a whole frame of screen 's' (one that takes no other).
+static bool flbIsWhole(const FlbClip *clip, uint32_t e, int s)
+{
+    const FlbEntry *entry = &clip->entries[e];
+    return (s == FLB_TOP ? entry->size : entry->bottomSize) != 0 &&
+           !(entry->flags & (s == FLB_TOP ? FLB_FRAME_TOP_DELTA : FLB_FRAME_BOTTOM_DELTA));
+}
+
+// Whether screen 's''s next frame after entry 'e' is one of what changed (and
+// so needs the picture as of 'e').
+static bool flbNextIsDelta(const FlbClip *clip, uint32_t e, int s)
+{
+    for (uint32_t i = e + 1; i < clip->info.entryCount; i++)
+        if ((s == FLB_TOP ? clip->entries[i].size : clip->entries[i].bottomSize) != 0)
+            return (clip->entries[i].flags & (s == FLB_TOP ? FLB_FRAME_TOP_DELTA : FLB_FRAME_BOTTOM_DELTA)) != 0;
+    return false;
+}
+
+// Each of the screens wanted is made from its last whole frame at or before
+// 'e', and the frames of what changed after it; if the clip's picture is from
+// between those already (playing on), only from the entries after it. A screen
+// with no whole frame yet is unknown: its frames of what changed are passed
+// over. Each entry's frames are read in one go.
+//
+// With 'into', when 'e' has a whole frame of a screen that the next one
+// doesn't need (it's whole too, as most are), that frame is decoded straight
+// into into[] for that screen instead (if it's not NULL), and direct[] set:
+// the clip then keeps no picture of that screen (at[] is UINT32_MAX), which
+// saves copying it out.
+static bool flbSeek(FlbClip *clip, uint32_t e, bool top, bool bottom, uint16_t *const *into, bool *direct,
+                    const char **error)
+{
+    if (direct != NULL)
+        direct[FLB_TOP] = direct[FLB_BOTTOM] = false;
+    const FlbInfo *info = &clip->info;
+    if (!info->hasScreens)
+        return true;    // (nothing kept: every frame is whole)
+    bool want[2] = { top, bottom && info->bottomWidth != 0 };
+    uint32_t from[2] = { e + 1, e + 1 };     // each screen's first entry to take (e + 1: none)
+
+    for (int s = 0; s < 2; s++)
+    {
+        if (!want[s])
+            continue;
+        if (clip->picture[s] == NULL && (clip->picture[s] = malloc(flbScreenBytes(info, s))) == NULL)
+        {
+            *error = "not enough memory for this clip";
+            return false;
+        }
+        // (A picture from after 'e', or none: it's made anew.)
+        bool held = clip->at[s] != UINT32_MAX && clip->at[s] <= e;
+        uint32_t start = held ? clip->at[s] + 1 : 0;
+        from[s] = start;
+        for (uint32_t i = e + 1; i-- > start;)
+            if (flbIsWhole(clip, i, s))
+            {
+                from[s] = i;
+                break;
+            }
+        if (!held && !(from[s] <= e && flbIsWhole(clip, from[s], s)))
+        {
+            // No whole frame at or before 'e': the screen is unknown there.
+            if (clip->known[s])
+                clip->changes[s]++;
+            clip->known[s] = false;
+            from[s] = e + 1;
+        }
+        clip->at[s] = UINT32_MAX;   // (until it's there: a frame that can't be read leaves the picture part made)
+    }
+
+    for (uint32_t i = from[FLB_TOP] < from[FLB_BOTTOM] ? from[FLB_TOP] : from[FLB_BOTTOM]; i <= e; i++)
+    {
+        const FlbEntry *entry = &clip->entries[i];
+        uint32_t size[2] = { entry->size, entry->bottomSize }, at[2] = { 0, flbBottomAt(entry) };
+        bool take[2];
+        for (int s = 0; s < 2; s++)
+            take[s] = want[s] && i >= from[s] && size[s] != 0 && (clip->known[s] || flbIsWhole(clip, i, s));
+        if (!take[FLB_TOP] && !take[FLB_BOTTOM])
+            continue;
+
+        uint32_t a = take[FLB_TOP] ? 0 : at[FLB_BOTTOM];
+        uint32_t b = take[FLB_BOTTOM] ? at[FLB_BOTTOM] + size[FLB_BOTTOM] : size[FLB_TOP];
+        const uint8_t *data = flbReadStored(clip, (uint64_t)entry->offset + a, b - a);
+        if (data == NULL)
+        {
+            *error = "the file couldn't be read";
+            return false;
+        }
+        for (int s = 0; s < 2; s++)
+        {
+            if (!take[s])
+                continue;
+            const uint8_t *src = data + at[s] - a;
+            bool delta = (entry->flags & (s == FLB_TOP ? FLB_FRAME_TOP_DELTA : FLB_FRAME_BOTTOM_DELTA)) != 0;
+            bool coded = (entry->flags & (s == FLB_TOP ? FLB_FRAME_TOP_CODES : FLB_FRAME_BOTTOM_CODES)) != 0;
+            uint32_t w = s == FLB_TOP ? info->width : info->bottomWidth, h = s == FLB_TOP ? info->height : info->bottomHeight;
+            uint16_t *dst = clip->picture[s];
+            if (into != NULL && into[s] != NULL && i == e && !delta && !flbNextIsDelta(clip, e, s))
+            {
+                dst = into[s];
+                direct[s] = true;
+            }
+            if (!delta && size[s] == w * h * 2)
+                memcpy(dst, src, size[s]);      // (stored as it is)
+            else
+            {
+                if (coded && clip->codes == NULL && (clip->codes = malloc(sizeof(FlbCodes))) == NULL)
+                {
+                    *error = "not enough memory for this clip";
+                    return false;
+                }
+                if (!flbDecodeFrame(src, size[s], dst, w, h, delta, coded, clip->codes))
+                {
+                    snprintf(g_error, sizeof(g_error), "frame %lu is damaged", (unsigned long)i);
+                    *error = g_error;
+                    return false;
+                }
+            }
+            clip->known[s] = true;
+            clip->changes[s]++;
+        }
+    }
+    for (int s = 0; s < 2; s++)
+        if (want[s])
+            clip->at[s] = direct != NULL && direct[s] ? UINT32_MAX : e;
+    return true;
+}
+
+bool flbSeekScreens(FlbClip *clip, uint32_t e, bool top, bool bottom, const char **error)
+{
+    return flbSeek(clip, e, top, bottom, NULL, NULL, error);
+}
+
+bool flbDecodeScreens(FlbClip *clip, uint32_t entry, uint16_t *top, uint16_t *bottom, const char **error)
+{
+    const FlbInfo *info = &clip->info;
+    if (!info->hasScreens)
+        return top == NULL || flbDecodeWhole(clip, entry, top, error);
+
+    uint16_t *into[2] = { top, bottom };
+    bool direct[2];
+    if (!flbSeek(clip, entry, top != NULL, bottom != NULL, into, direct, error))
+        return false;
+    // (A screen that's unknown, or that the clip hasn't got, is black.)
+    if (top != NULL && !direct[FLB_TOP] && clip->known[FLB_TOP])
+        memcpy(top, clip->picture[FLB_TOP], info->slotBytes);
+    else if (top != NULL && !direct[FLB_TOP])
+        memset(top, 0, info->slotBytes);
+    if (bottom != NULL && !direct[FLB_BOTTOM] && info->bottomWidth != 0 && clip->known[FLB_BOTTOM])
+        memcpy(bottom, clip->picture[FLB_BOTTOM], flbScreenBytes(info, FLB_BOTTOM));
+    else if (bottom != NULL && !direct[FLB_BOTTOM])
+        memset(bottom, 0, flbScreenBytes(info, FLB_BOTTOM));
+    return true;
+}
+
+bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **error)
+{
+    return flbDecodeScreens(clip, entry, dst, NULL, error);
 }
 
 bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, const char **error)
@@ -393,16 +641,47 @@ bool flbReadAudio(FlbClip *clip, uint32_t first, uint32_t count, int16_t *dst, c
     return true;
 }
 
-// The index entries frames firstFrame .. firstFrame + frameCount - 1 use:
-// *first holds the first of them, *end is one past the one holding the last.
-static void flbEntryRange(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount, uint32_t *first, uint32_t *end)
+// The index entries a copy of frames firstFrame .. firstFrame + frameCount - 1
+// holds: *first .. *end - 1. *shown is the one shown at the first frame, and
+// *end is one past the one holding the last. The entries before *shown are
+// only read in the copy (FLB_VERSION_SCREENS): 'whole' (compacting) keeps
+// every entry of the clip; otherwise (trimming) they're the ones the first
+// frame takes to make out, from the last entry at or before *shown with the
+// top screen whole, or with the bottom screen whole, whichever comes first (a
+// screen with no whole frame by then doesn't count; without one of the top
+// screen's, from *shown).
+static void flbCopyRange(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount, bool whole,
+                         uint32_t *first, uint32_t *shown, uint32_t *end)
 {
-    *first = flbEntryForFrame(clip, firstFrame);
+    *shown = flbEntryForFrame(clip, firstFrame);
     *end = flbEntryForFrame(clip, firstFrame + frameCount - 1) + 1;
+    *first = *shown;
+    if (!clip->info.hasScreens)
+        return;
+    if (whole)
+    {
+        *first = 0;
+        *end = clip->info.entryCount;
+        return;
+    }
+    uint32_t key[2] = { *shown, *shown };
+    for (int s = 0; s < 2; s++)
+    {
+        bool found = false;
+        for (uint32_t i = *shown + 1; i-- > 0 && !found;)
+            if (flbIsWhole(clip, i, s))
+            {
+                key[s] = i;
+                found = true;
+            }
+        if (s == FLB_BOTTOM && !found)
+            key[s] = key[FLB_TOP];
+    }
+    *first = key[FLB_TOP] < key[FLB_BOTTOM] ? key[FLB_TOP] : key[FLB_BOTTOM];
 }
 
 // How many of those frames entry 'e' is shown for (fewer than its copies if the
-// range starts or ends part way through them).
+// range starts or ends part way through them; none if it comes before them).
 static uint32_t flbCopiesIn(const FlbClip *clip, uint32_t e, uint32_t firstFrame, uint32_t frameCount)
 {
     const FlbEntry *entry = &clip->entries[e];
@@ -410,26 +689,32 @@ static uint32_t flbCopiesIn(const FlbClip *clip, uint32_t e, uint32_t firstFrame
     uint32_t to = entry->firstFrame + entry->copies;
     if (to > firstFrame + frameCount)
         to = firstFrame + frameCount;
-    return to - from;
+    return to > from ? to - from : 0;
 }
 
-uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount)
+// The size of a copy of those frames (see flbCopyRange).
+static uint64_t flbCopySize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount, bool whole)
 {
     const FlbInfo *info = &clip->info;
-    uint32_t first, end;
-    flbEntryRange(clip, firstFrame, frameCount, &first, &end);
+    uint32_t first, shown, end;
+    flbCopyRange(clip, firstFrame, frameCount, whole, &first, &shown, &end);
     uint64_t size = (uint64_t)(end - first) * flbEntrySize(info) + flbAudioInfoSize(info) + FLB_TRAILER_SIZE +
                     flbInputsSize(clip, frameCount);
     for (uint32_t e = first; e < end; e++)
-        size += clip->entries[e].size;
+        size += flbEntryData(&clip->entries[e]);
     if (info->hasAudio)
         size += (uint64_t)flbAudioSamplesIn(info, frameCount) * 4;
     return size;
 }
 
+uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCount)
+{
+    return flbCopySize(clip, firstFrame, frameCount, false);
+}
+
 uint64_t flbCompactSize(const FlbClip *clip)
 {
-    return flbTrimSize(clip, 0, clip->info.frameCount);
+    return flbCopySize(clip, 0, clip->info.frameCount, true);
 }
 
 static void flbCompactFree(FlbCompactor *c)
@@ -486,19 +771,19 @@ static bool flbCopyBegin(FlbCompactor *c, const char *path, const char *outPath,
     }
     c->firstFrame = firstFrame;
     c->frameCount = frameCount;
-    flbEntryRange(&c->clip, firstFrame, frameCount, &c->firstEntry, &c->endEntry);
+    flbCopyRange(&c->clip, firstFrame, frameCount, compacting, &c->firstEntry, &c->shownEntry, &c->endEntry);
     c->next = c->firstEntry;
 
     // Just the audio the frames last, from where the first one's starts (its
     // entry's, plus the copies of it skipped): readers play a clip's audio
-    // straight on from its first entry's position, which is then 0.
+    // straight on from its first shown entry's position, which is then 0.
     if (info->hasAudio)
     {
-        const FlbEntry *first = &c->clip.entries[c->firstEntry];
+        const FlbEntry *first = &c->clip.entries[c->shownEntry];
         c->audioStart = first->audioPos + flbAudioOffsetOf(info, firstFrame - first->firstFrame);
         c->audioCount = flbAudioSamplesIn(info, frameCount);
     }
-    uint64_t size = flbTrimSize(&c->clip, firstFrame, frameCount);
+    uint64_t size = flbCopySize(&c->clip, firstFrame, frameCount, compacting);
     c->total = size - (uint64_t)(c->endEntry - c->firstEntry) * flbEntrySize(info) -
                flbAudioInfoSize(info) - FLB_TRAILER_SIZE - flbInputsSize(&c->clip, frameCount);
     c->buf = malloc(FLB_COMPACT_BUFFER);
@@ -628,16 +913,34 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
         uint32_t e = c->firstEntry + i;
         const FlbEntry *entry = &c->clip.entries[e];
         uint8_t *p = index + i * entrySize;
-        flbPut32(p, c->offsets[i]);
-        flbPut32(p + 4, entry->size);
-        flbPut32(p + 8, flbCopiesIn(&c->clip, e, c->firstFrame, c->frameCount));
-        if (info->hasAudio)
+        // (The entries before the one first shown are only read: no copies.)
+        uint32_t copies = e < c->shownEntry ? 0 : flbCopiesIn(&c->clip, e, c->firstFrame, c->frameCount);
+        // The copy's audio starts at its first frame, and the entry shown
+        // there may be kept from part way through its copies.
+        uint32_t audioPos = 0;
+        if (info->hasAudio && copies != 0)
         {
-            // The copy's audio starts at its first frame, and its first entry
-            // may be kept from part way through its copies.
             uint32_t skipped = entry->firstFrame < c->firstFrame ? c->firstFrame - entry->firstFrame : 0;
             uint32_t pos = entry->audioPos + flbAudioOffsetOf(info, skipped);
-            flbPut32(p + 12, pos > c->audioStart ? pos - c->audioStart : 0);
+            audioPos = pos > c->audioStart ? pos - c->audioStart : 0;
+        }
+        flbPut32(p, c->offsets[i]);
+        flbPut32(p + 4, entry->size);
+        if (info->hasScreens)
+        {
+            // (Its missed frames are copies after its first: with copies cut,
+            // at most those left.)
+            uint32_t missed = copies == 0 ? 0 : entry->missed < copies - 1 ? entry->missed : copies - 1;
+            flbPut32(p + 8, entry->bottomSize);
+            flbPut32(p + 12, copies);
+            flbPut32(p + 16, audioPos);
+            flbPut32(p + 20, entry->flags | missed << 16);
+        }
+        else
+        {
+            flbPut32(p + 8, copies);
+            if (info->hasAudio)
+                flbPut32(p + 12, audioPos);
         }
     }
     if (info->hasAudio)
@@ -656,7 +959,8 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     uint8_t *t = index + indexSize;
     memset(t, 0, FLB_TRAILER_SIZE);
     flbPut32(t, FLB_MAGIC);
-    flbPut32(t + 4, (info->hasAudio ? FLB_VERSION_AUDIO : FLB_VERSION_COMPACT) | (info->hasCodes ? FLB_VERSION_CODES : 0));
+    flbPut32(t + 4, (info->hasAudio ? FLB_VERSION_AUDIO : FLB_VERSION_COMPACT) | (info->hasCodes ? FLB_VERSION_CODES : 0) |
+                    (info->hasScreens ? FLB_VERSION_SCREENS : 0));
     flbPut32(t + 8, info->width);
     flbPut32(t + 12, info->height);
     flbPut32(t + 16, info->fps);
@@ -666,6 +970,7 @@ static bool flbCompactFinish(FlbCompactor *c, const char **error)
     flbPut32(t + 32, c->frameCount);
     flbPut32(t + 36, (uint32_t)(c->copied + inputSize));
     flbPut32(t + 40, inputOffset);
+    flbPut32(t + 44, info->bottomWidth | info->bottomHeight << 16);     // (0 before FLB_VERSION_SCREENS)
 
     bool ok = flbCompactPut(c, tail, inputSize + indexSize + FLB_TRAILER_SIZE) && flbCompactFlush(c);
     free(tail);
@@ -726,21 +1031,27 @@ int flbCompactStep(FlbCompactor *c, const char **error)
 
     if (c->next < c->endEntry)
     {
-        // (Read into the clip's frame buffer: a frame can straddle two blocks.)
+        // (Read into the clip's frame buffer: an entry can straddle two
+        // blocks. It's both screens' frames, as they're stored: the top
+        // screen's, then the bottom screen's from the next multiple of 4
+        // bytes. What's between them is written as zeros, whatever it was.)
         const FlbEntry *e = &c->clip.entries[c->next];
-        if (fseeko(c->clip.file, e->offset, SEEK_SET) != 0 ||
-            fread(c->clip.stored, 1, e->size, c->clip.file) != e->size)
+        uint32_t len = flbEntryData(e);
+        if (len != 0 && (fseeko(c->clip.file, e->offset, SEEK_SET) != 0 ||
+                         fread(c->clip.stored, 1, len, c->clip.file) != len))
         {
             *error = "the clip couldn't be read";
             goto fail;
         }
-        if (!flbCompactPut(c, c->clip.stored, e->size))
+        if (e->bottomSize != 0)
+            memset(c->clip.stored + e->size, 0, flbBottomAt(e) - e->size);
+        if (!flbCompactPut(c, c->clip.stored, len))
         {
             *error = "the copy couldn't be written (is the SD card full?)";
             goto fail;
         }
         c->offsets[c->next++ - c->firstEntry] = (uint32_t)c->copied;
-        c->copied += e->size;
+        c->copied += len;
         return 0;
     }
 
@@ -807,15 +1118,51 @@ bool flbCleanUpLeftover(const char *path)
     return true;
 }
 
-// Decodes the recorder's frame compression, its ops (see flashbackCompress in
-// Luma3DS-Flashback's flashback_compress.c).
-static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels)
+// Decodes the recorder's frame compression, its ops (see flashbackCompress and
+// flashbackCompressDelta in Luma3DS-Flashback's flashback_compress.c), into
+// the upright w x h frame at 'dst'.
+//
+// A whole frame's pixels come upright, top row first. A frame stored as what
+// changed since the one before ('delta') has them in the screen's own order:
+// column by column, left to right, each from the bottom row up (the k-th goes
+// to (h - 1 - k % h) * w + k / h). 'dst' then holds the frame before it on the
+// same screen, and the pixels SKIP ops pass over stay as they are; only such
+// frames have SKIP ops. Either way, 'at' is where the next pixel goes; for a
+// delta, 'step' is what's added to it for the one after (a row up), and 'left'
+// how many more go before a new column starts.
+//
+// It's put in twice, with 'delta' a constant (flbDecodeOps): a whole frame's
+// pixels, most of them, then only take '*at++' (an Old 3DS decodes a frame in
+// about a frame's time, so the bookkeeping for columns showed).
+static inline __attribute__((always_inline)) bool flbDecodeOpsAs(const uint8_t *src, uint32_t len, uint16_t *dst,
+                                                                 uint32_t w, uint32_t h, const bool delta)
 {
     uint16_t index[64];
     memset(index, 0, sizeof(index));
     uint16_t px = 0;
     const uint8_t *p = src, *end = src + len;
-    uint32_t i = 0;
+    uint32_t i = 0, pixels = w * h;
+    uint32_t column = delta ? h : pixels;
+    uint16_t *at = delta ? dst + (size_t)(h - 1) * w : dst;
+    ptrdiff_t step = delta ? -(ptrdiff_t)w : 1;
+    uint32_t left = column;
+
+// (Puts a pixel, and moves on: to the foot of the next column after a column's last.)
+#define FLB_PUT(value) \
+    do \
+    { \
+        *at = (value); \
+        i++; \
+        if (!delta) \
+            at++; \
+        else if (--left != 0) \
+            at += step; \
+        else \
+        { \
+            left = column; \
+            at = dst + (size_t)(h - 1) * w + i / h; \
+        } \
+    } while (0)
 
     while (i < pixels)
     {
@@ -823,7 +1170,29 @@ static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32
             return false;
         uint8_t b = *p++;
 
-        if (b == 0xFE)
+        if (b == 0xFF)
+        {
+            if (!delta || p >= end)
+                return false;
+            uint32_t count = *p++;
+            if (count == 0xFF)
+            {
+                if (end - p < 2)
+                    return false;
+                count = p[0] | (p[1] << 8);
+                p += 2;
+            }
+            count++;
+            if (count > pixels - i)
+                return false;
+            // (The previous pixel is now the last one passed over.)
+            i += count;
+            px = dst[(size_t)(h - 1 - (i - 1) % h) * w + (i - 1) / h];
+            left = h - i % h;
+            at = dst + (size_t)(h - 1 - i % h) * w + i / h;
+            continue;
+        }
+        else if (b == 0xFE)
         {
             if (end - p < 2)
                 return false;
@@ -836,13 +1205,13 @@ static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32
             if (run > pixels - i)
                 return false;
             while (run-- != 0)
-                dst[i++] = px;
+                FLB_PUT(px);
             continue;
         }
         else if ((b & 0xC0) == 0x00)
         {
             px = index[b];
-            dst[i++] = px;
+            FLB_PUT(px);
             continue;
         }
         else
@@ -869,9 +1238,15 @@ static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32
             px = (uint16_t)((r << 11) | (g << 5) | bl);
         }
         index[((uint32_t)px * 0x9E3779B1u) >> 26] = px;
-        dst[i++] = px;
+        FLB_PUT(px);
     }
+#undef FLB_PUT
     return p == end;
+}
+
+static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t w, uint32_t h, bool delta)
+{
+    return delta ? flbDecodeOpsAs(src, len, dst, w, h, true) : flbDecodeOpsAs(src, len, dst, w, h, false);
 }
 
 #define FLB_CODES_HEADER    264     // a frame packed with Huffman codes: bytes before the codes
@@ -881,7 +1256,7 @@ static bool flbDecodeOps(const uint8_t *src, uint32_t len, uint16_t *dst, uint32
 // stand for, at most 'cap' of them, into codes->bytes; sets *count.
 static bool flbDecodeCodes(const uint8_t *src, uint32_t len, FlbCodes *codes, uint32_t cap, uint32_t *count)
 {
-    if (len < FLB_CODES_HEADER || src[1] != 1)
+    if (len < FLB_CODES_HEADER || src[0] != 0xFF || src[1] != 1)
         return false;
     uint32_t n = flbU32(src + 4);
     if (n > cap || n > sizeof(codes->bytes))
@@ -926,8 +1301,9 @@ static bool flbDecodeCodes(const uint8_t *src, uint32_t len, FlbCodes *codes, ui
     }
 
     // The bytes, each set's codes in turn: an op byte, then the bytes after it
-    // (LUMA's second, RAW's two).
+    // (LUMA's second, RAW's two, SKIP's count: one, or three if the first is 0xFF).
     uint32_t pos = FLB_CODES_HEADER, bits = 0, have = 0, after = 0;
+    bool skipCount = false;     // the next byte is the first after a SKIP
     for (uint32_t i = 0; i < n; i++)
     {
         while (have <= 24)
@@ -944,9 +1320,17 @@ static bool flbDecodeCodes(const uint8_t *src, uint32_t len, FlbCodes *codes, ui
         uint8_t b = (uint8_t)e;
         codes->bytes[i] = b;
         if (after != 0)
+        {
             after--;
+            if (skipCount && b == 0xFF)
+                after += 2;
+            skipCount = false;
+        }
         else
-            after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : 0;
+        {
+            after = b >= 0x80 && b < 0xC0 ? 1 : b == 0xFE ? 2 : b == 0xFF ? 1 : 0;
+            skipCount = b == 0xFF;
+        }
     }
     // (The codes must end in the frame's last 2 bytes: it's padded to 2.)
     uint64_t used = (uint64_t)(pos - FLB_CODES_HEADER) * 8 - have, held = (uint64_t)(len - FLB_CODES_HEADER) * 8;
@@ -956,13 +1340,19 @@ static bool flbDecodeCodes(const uint8_t *src, uint32_t len, FlbCodes *codes, ui
     return true;
 }
 
-bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels, FlbCodes *codes)
+bool flbDecodeFrame(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t w, uint32_t h, bool delta, bool coded,
+                    FlbCodes *codes)
 {
-    if (len != 0 && src[0] == 0xFF)
+    if (coded)
     {
         uint32_t count;
-        return codes != NULL && flbDecodeCodes(src, len, codes, pixels * 2, &count) &&
-               flbDecodeOps(codes->bytes, count, dst, pixels);
+        return codes != NULL && flbDecodeCodes(src, len, codes, w * h * 2, &count) &&
+               flbDecodeOps(codes->bytes, count, dst, w, h, delta);
     }
-    return flbDecodeOps(src, len, dst, pixels);
+    return flbDecodeOps(src, len, dst, w, h, delta);
+}
+
+bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels, FlbCodes *codes)
+{
+    return flbDecodeFrame(src, len, dst, pixels, 1, false, len != 0 && src[0] == 0xFF, codes);
 }

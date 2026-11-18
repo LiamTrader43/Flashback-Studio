@@ -52,8 +52,34 @@
 // codes for its compressed bytes, two sets of them (one for op bytes, one for
 // the bytes after ops), their lengths in its first 264 bytes.
 //
-// All values little-endian. Frames are RGB565, top row first. Every frame is
-// compressed on its own, so any frame can be decoded without the ones before it.
+// A clip recorded since Flashback stores only what changes has 0x200
+// (FLB_VERSION_SCREENS) added to its version too, and differs in these ways:
+//
+//   - It can have the bottom screen as well: the trailer's last word is its
+//     width | height << 16 (0 if it has none).
+//   - Every index entry is 24 bytes, whatever the version: { u32 offset, u32
+//     topSize, u32 bottomSize, u32 copies, u32 audioPos, u32 flags }. An entry
+//     holds what's new at one moment: the top screen's frame (topSize bytes at
+//     'offset'), the bottom screen's (bottomSize bytes, from the next multiple
+//     of 4 bytes after the top screen's), or both. A screen whose size is 0 is
+//     as it was after the entry before.
+//   - 'copies' can be 0: the entry is only read, not shown. Such entries lead
+//     in to the clip's first frame (see the next point).
+//   - A frame can be stored as what changed since the frame before it on the
+//     same screen (flags: FLB_FRAME_TOP_DELTA, FLB_FRAME_BOTTOM_DELTA; see
+//     flbDecodeFrame). Decoding it takes that screen's picture after the entry
+//     before, so a screen's picture at an entry is made from its last whole
+//     frame on. Until a screen's first whole frame, it's unknown (black). The
+//     recorder stores both screens whole at least every 30 entries.
+//   - Whether a frame is packed with Huffman codes is in the flags too
+//     (FLB_FRAME_TOP_CODES, FLB_FRAME_BOTTOM_CODES), not in its first byte.
+//   - The flags' top 16 bits are how many of the entry's copies are missed
+//     frames (their capture was missed). The other copies after the first are
+//     moments where nothing on either screen had changed.
+//
+// All values little-endian. Frames are RGB565, top row first. Without
+// FLB_VERSION_SCREENS every frame is compressed on its own, so any frame can be
+// decoded without the ones before it.
 //
 // Plain C and stdio only, so it also builds and is tested on a PC.
 
@@ -65,16 +91,30 @@
 
 #define FLB_TRAILER_SIZE 48
 #define FLB_VERSION_CODES   0x100   // added to the version: frames may be packed with Huffman codes
+#define FLB_VERSION_SCREENS 0x200   // added to the version: only what changes is stored, on one screen or two (see above)
 #define FLB_CODE_BITS       12      // the longest of those codes
+
+// How an entry's frames are stored (FlbEntry.flags), in a clip with FLB_VERSION_SCREENS.
+#define FLB_FRAME_TOP_DELTA     0x01    // the top screen's: what changed since the frame before
+#define FLB_FRAME_TOP_CODES     0x02    // ...packed with Huffman codes
+#define FLB_FRAME_BOTTOM_DELTA  0x04    // the same, for the bottom screen's
+#define FLB_FRAME_BOTTOM_CODES  0x08
+
+// The screens.
+enum { FLB_TOP = 0, FLB_BOTTOM = 1 };
 
 typedef struct FlbInfo {
     uint32_t version;       // 1: as recorded, 2: compacted, 3: with audio (either)
     bool hasCodes;          // frames may be packed with Huffman codes (FLB_VERSION_CODES)
-    uint32_t width, height, fps;
+    bool hasScreens;        // only what changes is stored (FLB_VERSION_SCREENS)
+    uint32_t width, height, fps;    // (the top screen's frames)
+    uint32_t bottomWidth, bottomHeight;     // the bottom screen's frames (0: the clip has none)
     uint32_t slotStride;    // bytes between ring slots (0 once compacted)
-    uint32_t slotBytes;     // size of an uncompressed frame
-    uint32_t entryCount;    // stored frames
+    uint32_t slotBytes;     // size of an uncompressed frame of the top screen
+    uint32_t entryCount;    // index entries
     uint32_t frameCount;    // frames in the clip, copies included
+    uint32_t missedFrames;  // of which missed frames: copies of the one before (UINT32_MAX: not known until
+                            // the clip is opened, with FLB_VERSION_SCREENS: it's in the index)
     uint32_t indexOffset;   // where the index starts
     uint64_t fileSize;
     // Audio (version 3)
@@ -95,12 +135,17 @@ typedef struct FlbInput {
 } FlbInput;
 
 typedef struct FlbEntry {
-    uint32_t offset, size, copies;  // where the stored frame is in the file, its size, times shown
+    uint32_t offset, size, copies;  // where the stored frame is in the file, its size, times shown. With
+                                    // FLB_VERSION_SCREENS: the top screen's frame (0: as before), and
+                                    // copies can be 0 (an entry that's only read)
     uint32_t firstFrame;            // the clip frame this entry is first shown at
     uint32_t audioPos;              // the audio sample it's first shown at (with audio)
+    uint32_t bottomSize;            // the bottom screen's frame's size (0: as before, or none)
+    uint16_t missed;                // how many of its copies are missed frames (the last ones, for the readers)
+    uint8_t flags;                  // FLB_FRAME_*
 } FlbEntry;
 
-// What decoding a frame packed with Huffman codes takes (flbDecompress): each
+// What decoding a frame packed with Huffman codes takes (flbDecodeFrame): each
 // set of codes by their next FLB_CODE_BITS bits, and the compressed bytes they
 // stand for. A clip has its own, so clips can be decoded on different threads.
 typedef struct FlbCodes {
@@ -112,9 +157,18 @@ typedef struct FlbClip {
     FILE *file;
     FlbInfo info;
     FlbEntry *entries;
-    uint8_t *stored;        // one stored frame, as read from the file
+    uint32_t firstShown;    // the entry shown at the clip's first frame (the ones before it are only read)
+    uint8_t *stored;        // an entry's stored frames, as read from the file
     FlbInput *inputs;       // the inputs during each frame (frameCount of them), or NULL if the clip has none
     FlbCodes *codes;        // for frames packed with Huffman codes (made for the first one)
+    // With FLB_VERSION_SCREENS: each screen's picture as of entry at[] (made
+    // when first asked for; UINT32_MAX: none, as after flbDecodeScreens put the
+    // screen's whole frame straight where it was wanted), whether it has had
+    // a whole frame yet, and how many times it has changed.
+    uint16_t *picture[2];
+    uint32_t at[2];
+    bool known[2];
+    uint32_t changes[2];
 } FlbClip;
 
 // Reads and checks a clip's trailer. On failure returns false and points
@@ -131,20 +185,48 @@ void flbClose(FlbClip *clip);
 // The index entry shown at clip frame 'frame' (0 .. frameCount - 1).
 uint32_t flbEntryForFrame(const FlbClip *clip, uint32_t frame);
 
-// Reads and decodes entry 'entry' into 'dst' (width * height pixels).
-// On failure returns false and points 'error' at a message.
+// Reads and decodes the top screen's picture as of entry 'entry' into 'dst'
+// (width * height pixels). On failure returns false and points 'error' at a
+// message. With FLB_VERSION_SCREENS, that takes the entries from the screen's
+// last whole frame on; the clip keeps the picture, so the entries after it
+// (playing on) only take their own.
 bool flbDecodeEntry(FlbClip *clip, uint32_t entry, uint16_t *dst, const char **error);
 
-// Decompresses exactly 'pixels' pixels from exactly 'len' bytes of a stored
-// frame (not stored raw), through 'codes' if it's packed with Huffman codes.
-// Returns false if the data is malformed (never writes past 'dst' + 'pixels').
+// The same for both screens: the top screen's picture into 'top', the bottom
+// screen's (bottomWidth * bottomHeight pixels; black if the clip has none, or
+// before its first whole frame) into 'bottom'. Either can be NULL: that
+// screen's frames aren't read. clip->changes[] tells whether a picture is
+// another than last time.
+bool flbDecodeScreens(FlbClip *clip, uint32_t entry, uint16_t *top, uint16_t *bottom, const char **error);
+
+// The same without the copies, with FLB_VERSION_SCREENS: brings the clip's own
+// pictures of the screens asked for (clip->picture[], while clip->known[]) to
+// what they are as of entry 'entry'.
+bool flbSeekScreens(FlbClip *clip, uint32_t entry, bool top, bool bottom, const char **error);
+
+// Decodes a stored frame (not one stored raw) of a w x h screen into 'dst',
+// upright: exactly 'len' bytes, packed with Huffman codes if 'coded' (through
+// 'codes'), and if 'delta', what changed since the frame before it on the same
+// screen, which 'dst' holds. (Such a frame has one more op, SKIP: 0xFF n, the
+// next n + 1 pixels stay as they are, or 0xFF 0xFF lo hi, the next
+// (lo | hi << 8) + 1 do; and its pixels come in the screen's own order: column
+// by column, left to right, each from the bottom row up.) Returns false if the
+// data is malformed (never writes outside the frame; a delta frame that fails
+// can leave 'dst' part changed).
+bool flbDecodeFrame(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t w, uint32_t h, bool delta, bool coded,
+                    FlbCodes *codes);
+
+// Decompresses exactly 'pixels' pixels from exactly 'len' bytes of a whole
+// frame (not stored raw) of a clip without FLB_VERSION_SCREENS: through 'codes'
+// if it starts with 0xFF (it's packed with Huffman codes). Returns false if the
+// data is malformed (never writes past 'dst' + 'pixels').
 bool flbDecompress(const uint8_t *src, uint32_t len, uint16_t *dst, uint32_t pixels, FlbCodes *codes);
 
 // Compacted already (version 2, or 3 without slots)?
 bool flbIsCompacted(const FlbInfo *info);
 
 // How many audio samples a clip's frames last (its audio track starts at the
-// first entry's audioPos).
+// first shown entry's audioPos).
 uint32_t flbAudioSamples(const FlbInfo *info);
 
 // Reads stereo PCM16 samples first .. first + count - 1 into 'dst'; samples the
@@ -165,6 +247,11 @@ uint64_t flbTrimSize(const FlbClip *clip, uint32_t firstFrame, uint32_t frameCou
 // end of a compaction, and is left as it was if anything fails or it's
 // cancelled. The Windows app does the same (windows-app/FlbCompactor.cs), byte
 // for byte: keep the two alike (tests/ checks they are).
+//
+// With FLB_VERSION_SCREENS, compacting keeps every entry. A trimmed clip starts
+// with the entries its first frame takes to make out, which aren't shown
+// (copies 0): from the last one before it with the top screen whole, or with
+// the bottom screen whole, whichever comes first.
 typedef struct FlbCompactor {
     FlbClip clip;
     FILE *out;
@@ -172,7 +259,8 @@ typedef struct FlbCompactor {
     char outPath[256];      // the copy: the clip itself when compacting
     char tmpPath[264];      // the copy, until it's finished
     uint32_t firstFrame, frameCount;    // the frames copied
-    uint32_t firstEntry, endEntry;      // the index entries they use
+    uint32_t firstEntry, endEntry;      // the index entries copied...
+    uint32_t shownEntry;                // ...the one shown at the first frame (the ones before it lead in to it)
     uint8_t *buf;           // the block of the copy being filled
     uint32_t bufLen;
     uint32_t *offsets;      // each copied entry's offset in the copy

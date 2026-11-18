@@ -1,8 +1,9 @@
 # Flashback Studio's PC tests
 
 These test the app's own code on a PC: the clip reader and compactor
-(`3ds-app/source/flb.c`), and the player's read-ahead thread (the "Reading
-ahead" section of `3ds-app/source/main.c`). They also test the Windows app's
+(`3ds-app/source/flb.c`), and the player's read-ahead threads (the "Reading
+ahead" and "Reading the bottom screen ahead" sections of
+`3ds-app/source/main.c`). They also test the Windows app's
 code (`windows-app/`). Run them after changing any of those:
 
 ```
@@ -45,8 +46,8 @@ Windows, if the drive can't hold sparse files (FAT32 or exFAT), it's left out.
 
 `codes_test.c` checks `flb.c`'s decoding of frames packed with Huffman codes,
 as a New 3DS records them. It makes its frames with a copy of the recorder's
-own compression (from Luma3DS-Flashback's `flashback_compress.c`), so keep that
-copy in step with the recorder:
+own compression (`recorder_copy.h`, from Luma3DS-Flashback's
+`flashback_compress.c`), so keep that copy in step with the recorder:
 - frames of several kinds, at both resolutions, are packed one after another,
   as recording does (each frame's codes come from the counts of the frame
   before), and every one must decode to exactly the frame;
@@ -57,24 +58,71 @@ copy in step with the recorder:
   with and without sound), must open and play, and keep the flag and every
   frame when compacted and trimmed.
 
+## Changed-only clips test
+
+`screens_test.c` checks `flb.c` on the clips Flashback saves since it stores
+only what changes (the version flag `0x200`: see `docs/clip-format.md`). It
+makes up recordings, and saves each as a clip the way the recorder does, with
+frames from the same copy of the recorder's compression:
+- the top screen alone, or with the bottom screen, at small sizes and at the
+  real ones;
+- frames stored whole (as they are, compressed, or packed with Huffman codes)
+  and as what changed since the frame before;
+- a screen left out of an entry when it hasn't changed, no entry when neither
+  has, and captures missed;
+- both screens whole every so many entries, the bottom screen's sometimes late
+  or lost (the next one is then whole, or what changed since the last one
+  stored);
+- entries before the first frame that are only read, to lead in to it, and
+  entries after it with one screen's whole frame alone (the bottom screen's,
+  or the top screen's), shown for no frame.
+
+What every frame must show is worked out from the format's rules alone (a
+screen is black until its first whole frame). The test then checks that:
+- every frame reads back as that, in order and in any order, both screens
+  together and each on its own, with its inputs, and the clip's missed frames
+  are the ones its index counts;
+- compacted, the clip keeps every entry as it was, back to back, with zeros
+  between an entry's two frames, and shows the same;
+- trimmed (the recorded clip, the compacted one, and a trimmed one again), it
+  starts from the entry the format says, shows the same frames with their
+  inputs and their sound, counts the missed frames that are left, and is the
+  size foretold;
+- frames of what changed that are damaged (cut short, bits flipped) are never
+  written outside the frame, and damaged clips fail to open, or open and don't
+  crash.
+
 ## Read-ahead test
 
 The runner copies the "Reading ahead" section, unchanged, into
 `build/ahead_extracted.c`. The copy runs from the section's divider line up to
 the Player section's. `ahead_test.c` includes it, with pthreads standing in for
-libctru, and a stand-in decoder that takes a random while.
+libctru, and a stand-in decoder that takes a random while. The copy also has
+the next section, "Reading the bottom screen ahead". The stand-in clip has
+frames of its bottom screen at random entries (most clips have one; some
+don't), and the system core is refused in some sessions.
 
 A simulated player then uses the clip at random. It plays (sometimes skipping a
 frame, as at 2x), jumps and scrubs, pauses, changes the trimmed part and the
-loop, and waits a while now and then. Some clips have a damaged frame. The test
-checks:
+loop, puts the clip's bottom screen up and down (Y), and waits a while now and
+then. Some clips have a damaged frame. The test checks:
 - every frame the player gets is the one it asked for;
-- a frame doesn't change while the player draws it;
+- while the bottom screen is up, every picture of it the player gets is the one
+  shown at that frame (black before its first whole frame), and paused, it
+  comes soon (playing, the player doesn't wait for it, and pictures that would
+  be read too late to be shown are passed over);
+- neither changes while the player draws it;
 - a damaged frame comes back as an error (only when the player reaches it), and
   never as a hang;
-- stopping closes the clip;
+- the bottom screen is read on the system core when the app may have some of
+  its time (asked for once), and on the app core as well (or only);
+- stopping closes the clip and ends both threads;
 - in steady play, reading ahead keeps up: once the first frames are read, the
-  player never waits.
+  player never waits, nor, with it up, is the bottom screen's picture late;
+- a bottom screen reader slower than its pictures come (as on an Old 3DS: a
+  picture every other frame, 2.5 frames to read one) still shows at least
+  half of them (at most 80% can be), rather than reading each one too late;
+  and two of them (on both cores) show 90% or more.
 
 A hang (no progress for 10 s) fails the test.
 

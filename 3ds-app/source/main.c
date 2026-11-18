@@ -30,6 +30,8 @@
 
 #define TOP_W       400
 #define TOP_H       240
+#define BOT_W       320
+#define BOT_H       240
 
 // The clip list is a grid of GRID_ROWS rows of GRID_COLS tiles under the title.
 // A tile is TILE_COLS console columns by TILE_ROWS rows: a blank row, then a
@@ -109,6 +111,10 @@ typedef struct Player {
     u32 inputsFrame;        // ...showing this frame's inputs
     bool settingsOpen;      // the Settings menu is open (X)...
     u32 settingsItem;       // ...and the setting selected in it
+    bool showBottom;        // the bottom screen shows the clip's own bottom screen, not the controls (Y)...
+    // ...this picture of it (read ahead: its id; read here: the clip's count of
+    // its changes; UINT32_MAX: none yet)
+    u32 bottomShown;
     u32 decodeUs, drawUs;   // last frame's read + decode, and drawing, times...
     u32 textUs;             // ...and the bottom screen's
     u32 skipped;            // stored frames passed over without being shown
@@ -239,8 +245,18 @@ static void formatTime(u32 frame, u32 fps, char *out, size_t size)
 
 static void formatResolution(const FlbInfo *info, char *out, size_t size)
 {
+    // (With the bottom screen too, there's room for less still.)
+    if (info->bottomWidth != 0)
+    {
+        char dims[16];
+        snprintf(dims, sizeof(dims), "%lux%lu", info->width, info->height);
+        snprintf(out, size, "%s, both screens, %lu fps%s",
+                 info->width == 400 && info->height == 240 ? "Full res" :
+                 info->width == 200 && info->height == 120 ? "Half res" : dims,
+                 info->fps, info->hasAudio ? ", sound" : "");
+    }
     // (With sound there isn't room for the size as well.)
-    if (info->hasAudio && info->width == 400 && info->height == 240)
+    else if (info->hasAudio && info->width == 400 && info->height == 240)
         snprintf(out, size, "Full resolution, %lu fps, with sound", info->fps);
     else if (info->hasAudio && info->width == 200 && info->height == 120)
         snprintf(out, size, "Half resolution, %lu fps, with sound", info->fps);
@@ -273,14 +289,16 @@ static void clearTop(void)
     presentTop();
 }
 
-// The framebuffer is the screen rotated: pixel (x, y) is fb[x * 240 + 239 - y].
-static void drawTopFrame(u16 *fb, const u16 *src, u32 w, u32 h)
+// A picture on a screen 'screenW' wide (either screen: both are TOP_H high), in
+// the middle, at twice its size if that fits (half resolution). The framebuffer
+// is the screen rotated: pixel (x, y) is fb[x * 240 + 239 - y].
+static void drawScreenFrame(u16 *fb, u32 screenW, const u16 *src, u32 w, u32 h)
 {
-    u32 scale = (w * 2 <= TOP_W && h * 2 <= TOP_H) ? 2 : 1;
-    u32 ox = (TOP_W - w * scale) / 2, oy = (TOP_H - h * scale) / 2;
+    u32 scale = (w * 2 <= screenW && h * 2 <= TOP_H) ? 2 : 1;
+    u32 ox = (screenW - w * scale) / 2, oy = (TOP_H - h * scale) / 2;
 
-    if (w * scale != TOP_W || h * scale != TOP_H)
-        memset(fb, 0, TOP_W * TOP_H * 2);
+    if (w * scale != screenW || h * scale != TOP_H)
+        memset(fb, 0, screenW * TOP_H * 2);
 
     if (scale == 2)
     {
@@ -311,10 +329,29 @@ static void drawTopFrame(u16 *fb, const u16 *src, u32 w, u32 h)
     }
 }
 
+static void drawTopFrame(u16 *fb, const u16 *src, u32 w, u32 h)
+{
+    drawScreenFrame(fb, TOP_W, src, w, h);
+}
+
 static void drawTop(const u16 *src, u32 w, u32 h)
 {
     drawTopFrame((u16 *)gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL), src, w, h);
     presentTop();
+}
+
+// A clip's bottom screen on the bottom screen, over the console's text (the
+// player's Y): in the middle, at twice its size if that fits (half resolution).
+// All black if 'src' is NULL (the clip's bottom screen isn't known yet). The
+// bottom screen isn't double buffered: it shows once it's out of the cache.
+static void drawBottom(const u16 *src, u32 w, u32 h)
+{
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+    if (src == NULL)
+        memset(fb, 0, BOT_W * BOT_H * 2);
+    else
+        drawScreenFrame(fb, BOT_W, src, w, h);
+    GSPGPU_FlushDataCache(fb, BOT_W * BOT_H * 2);
 }
 
 // The input display: a picture of the controls in the top screen's bottom
@@ -656,6 +693,7 @@ static void findCompactSize(Clip *c)
     if (flbOpen(&clip, path, &error))
     {
         c->compactSize = flbCompactSize(&clip);
+        c->info.missedFrames = clip.info.missedFrames;  // (known from the index, in some clips)
         flbClose(&clip);
     }
 }
@@ -709,7 +747,8 @@ static void loadThumb(Clip *c)
         return;
     if (c->compactSize == 0)
         c->compactSize = flbCompactSize(&clip);
-    if (flbDecodeEntry(&clip, 0, g_frame, &error))
+    c->info.missedFrames = clip.info.missedFrames;  // (known from the index, in some clips)
+    if (flbDecodeEntry(&clip, clip.firstShown, g_frame, &error))
         makeThumb(c, clip.info.width, clip.info.height);
     flbClose(&clip);
 }
@@ -913,8 +952,12 @@ static void drawList(const ListState *ls)
             formatLength(c->info.frameCount, c->info.fps, len, sizeof(len));
             formatSize(c->info.fileSize, size, sizeof(size));
             row(22, C_NORMAL, "Length %s (%lu frames), %s", len, c->info.frameCount, size);
-            u32 missed = c->info.frameCount - c->info.entryCount;
-            if (missed == 0)
+            // (A clip that stores only what changes has them in its index: not
+            // known until it's been opened, which the preview does.)
+            u32 missed = c->info.missedFrames;
+            if (missed == UINT32_MAX)
+                row(23, C_NORMAL, "");
+            else if (missed == 0)
                 row(23, C_NORMAL, "No missed frames");
             else
                 row(23, C_NORMAL, "Missed frames: %lu (shown as copies)", missed);
@@ -970,7 +1013,8 @@ static void showPreview(ListState *ls)
     {
         Clip *sel = &g_clips[ls->selected];
         sel->compactSize = flbCompactSize(&clip);
-        if (flbDecodeEntry(&clip, 0, g_frame, &error))
+        sel->info.missedFrames = clip.info.missedFrames;    // (known from the index, in some clips)
+        if (flbDecodeEntry(&clip, clip.firstShown, g_frame, &error))
         {
             drawTop(g_frame, clip.info.width, clip.info.height);
             if (sel->thumb == NULL)
@@ -1386,6 +1430,313 @@ static const u16 *aheadGet(u32 entry, const char **error, u32 *decodeUs)
 }
 
 // ---------------------------------------------------------------------------
+// Reading the bottom screen ahead
+//
+// While the clip's bottom screen is up (Y), threads of their own read its
+// pictures ahead, each into a buffer, so the player only has to put one up
+// when it changes. One runs on the system core when the app can have some of
+// it: an Old 3DS's app core hasn't the time for both screens' frames (with them
+// all on it, the top screen stuttered). Another runs on the app core, below
+// everything else there, in the time the top screen leaves. The player doesn't
+// wait for them while playing: the top screen comes first, and the bottom one
+// keeps its picture until the next is there.
+//
+// A picture is the clip's bottom screen as of an entry with a frame of it,
+// which is its id (BOTTOM_START: as of the clip's start, before any). Each
+// reader has the clip open for itself; 'shown' is the id of the picture shown
+// at each entry.
+//
+// Playing, a picture that would be read too late to be shown at all is passed
+// over: a reader reads one that'll still be on by the time it's read, going by
+// how long its last ones took. (Reading the one on screen first, as the top
+// screen's reading ahead does, a thread that had fallen behind stayed there: on
+// an Old 3DS, with a picture every other frame or so, each one was replaced
+// before it was read, and the bottom screen hardly changed.) The first reader
+// takes the soonest such picture, the other the last one looked ahead to, so
+// they don't get in each other's way.
+
+#define BOTTOM_BUFS     6               // the picture on screen and the next few
+#define BOTTOM_LOOK     15              // entries looked through for them, playing (~0.5 s)
+#define BOTTOM_START    0xFFFFFFFEu
+#define BOTTOM_READERS  2
+#define SYSTEM_CORE_PERCENT 30          // of the system core's time, for the app (more doesn't help an Old 3DS)
+
+struct BottomAhead;
+
+typedef struct BottomReader {
+    struct BottomAhead *a;
+    FlbClip clip;
+    Thread thread;
+    LightEvent wake;            // something else is wanted
+    bool systemCore;            // it runs on the system core
+    u32 readUs;                 // how long reading a picture takes it, of late (0: none read yet)
+} BottomReader;
+
+typedef struct BottomAhead {
+    bool running;
+    u32 readers;                // how many there are (the first is on the system core, if one is)
+    BottomReader reader[BOTTOM_READERS];
+    u32 *shown;                 // the picture shown at each entry
+    u32 entryCount, fps;
+    LightLock lock;             // for everything below
+    u32 held[BOTTOM_BUFS];      // the picture in each buffer, or UINT32_MAX
+    u32 reading[BOTTOM_BUFS];   // the picture being read into each buffer, or UINT32_MAX
+    // Wanted: the pictures shown at entry 'want' and the ones after it,
+    // 'count' entries in all (0: none), going round from 'last' to 'first' if
+    // 'loop' (as for reading ahead).
+    u32 want, count, first, last;
+    bool loop, quit;
+    u32 failed;                 // a picture that couldn't be read (UINT32_MAX: none)...
+    const char *error;          // ...and why
+} BottomAhead;
+
+static BottomAhead g_bottom;
+static u16 *g_bottomBuf[BOTTOM_BUFS];   // BOT_W x BOT_H each (or the clip's own bottom screen size)
+static bool g_systemCore;               // the app may have some of the system core's time
+
+static u32 bottomNext(const BottomAhead *a, u32 e)
+{
+    if (e == a->last)
+        return a->loop ? a->first : UINT32_MAX;
+    return e + 1 < a->entryCount ? e + 1 : UINT32_MAX;
+}
+
+// The pictures wanted, in the order they're shown, into 'ids', and how many
+// frames on from entry 'want' each is first shown, into 'from'; returns how
+// many. (At most BOTTOM_BUFS less one for each other reader: so there's always
+// a buffer for a reader with a picture to read, whatever the others are reading.)
+static u32 bottomWanted(const BottomAhead *a, u32 *ids, u32 *from)
+{
+    u32 n = 0, e = a->want, frames = 0, most = BOTTOM_BUFS + 1 - a->readers;
+    for (u32 k = 0; k < a->count && e != UINT32_MAX && n < most; k++, e = bottomNext(a, e))
+    {
+        bool listed = false;
+        for (u32 i = 0; i < n; i++)
+            listed = listed || ids[i] == a->shown[e];
+        if (!listed)
+        {
+            ids[n] = a->shown[e];
+            from[n++] = frames;
+        }
+        frames += a->reader[0].clip.entries[e].copies;
+    }
+    return n;
+}
+
+static int bottomFind(const u32 *list, u32 id)
+{
+    for (int i = 0; i < BOTTOM_BUFS; i++)
+        if (list[i] == id)
+            return i;
+    return -1;
+}
+
+static void bottomThread(void *arg)
+{
+    BottomReader *r = (BottomReader *)arg;
+    BottomAhead *a = r->a;
+    bool soonest = r == &a->reader[0];
+    LightLock_Lock(&a->lock);
+    while (!a->quit)
+    {
+        // A wanted picture that isn't read, nor being read, yet (nor found
+        // damaged), and that's still on when it's read (the last one wanted
+        // is, as far as is known): the soonest such, or for the other reader
+        // the last. 'readFrames': the frames a read takes, rounded up (the
+        // player only puts a picture up with a frame), and one more ('want' is
+        // from the player's last frame, up to one ago). And a buffer to read it
+        // into: one without a wanted picture, nor one being read.
+        u32 ids[BOTTOM_BUFS], from[BOTTOM_BUFS], n = bottomWanted(a, ids, from), id = UINT32_MAX;
+        u32 readFrames = a->count > 1 ? (u32)(((u64)r->readUs * a->fps + 999999) / 1000000) + 1 : 0;
+        for (u32 k = 0; k < n && id == UINT32_MAX; k++)
+        {
+            u32 i = soonest ? k : n - 1 - k;
+            if (ids[i] != a->failed && bottomFind(a->held, ids[i]) < 0 && bottomFind(a->reading, ids[i]) < 0 &&
+                (i + 1 == n || from[i + 1] > readFrames))
+                id = ids[i];
+        }
+        int b = -1;
+        for (int i = 0; id != UINT32_MAX && b < 0 && i < BOTTOM_BUFS; i++)
+        {
+            bool wanted = a->reading[i] != UINT32_MAX;
+            for (u32 k = 0; k < n; k++)
+                wanted = wanted || a->held[i] == ids[k];
+            if (!wanted)
+                b = i;
+        }
+        if (b < 0)
+        {
+            LightLock_Unlock(&a->lock);
+            LightEvent_Wait(&r->wake);
+            LightLock_Lock(&a->lock);
+            continue;
+        }
+
+        a->held[b] = UINT32_MAX;
+        a->reading[b] = id;
+        LightLock_Unlock(&a->lock);
+        // (Upright, as the clip has it: black for the clip's start, or while
+        // the bottom screen hasn't had a whole frame.)
+        const char *error = NULL;
+        u64 t0 = svcGetSystemTick();
+        bool ok = true;
+        if (id == BOTTOM_START)
+            memset(g_bottomBuf[b], 0, BOT_W * BOT_H * 2);
+        else
+            ok = flbDecodeScreens(&r->clip, id, NULL, g_bottomBuf[b], &error);
+        u32 us = (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
+        LightLock_Lock(&a->lock);
+        r->readUs = r->readUs == 0 ? us : (r->readUs * 3 + us) / 4;
+        a->reading[b] = UINT32_MAX;
+        if (ok)
+            a->held[b] = id;
+        else
+        {
+            a->failed = id;
+            a->error = error;
+        }
+    }
+    LightLock_Unlock(&a->lock);
+}
+
+static void bottomStop(void);
+
+// Starts reading the bottom screen of the clip at 'path' ahead, if it has one.
+// If it can't, the player reads it itself.
+static void bottomStart(const char *path)
+{
+    BottomAhead *a = &g_bottom;
+    const char *error;
+    memset(a, 0, sizeof(*a));
+    for (int i = 0; i < BOTTOM_BUFS; i++)
+    {
+        if (g_bottomBuf[i] == NULL)
+            return;
+        a->held[i] = a->reading[i] = UINT32_MAX;
+    }
+    a->failed = UINT32_MAX;
+    LightLock_Init(&a->lock);
+
+    // (Some of the system core's time, asked for once: for one thread of the
+    // app's there. It's not taken from what runs there unless that thread uses it.)
+    static bool asked;
+    if (!asked)
+    {
+        asked = true;
+        u32 percent = 0;
+        g_systemCore = (R_SUCCEEDED(APT_GetAppCpuTimeLimit(&percent)) && percent >= SYSTEM_CORE_PERCENT) ||
+                       R_SUCCEEDED(APT_SetAppCpuTimeLimit(SYSTEM_CORE_PERCENT));
+    }
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+
+    // The reader on the system core first (if it can be had), then the one on
+    // the app core, below the top screen's reading ahead.
+    for (int core = g_systemCore ? 1 : 0; core >= 0; core--)
+    {
+        BottomReader *r = &a->reader[a->readers];
+        r->a = a;
+        if (!flbOpen(&r->clip, path, &error))
+            break;
+        const FlbInfo *info = &r->clip.info;
+        if (info->bottomWidth == 0 || info->entryCount == 0 || info->bottomWidth > BOT_W || info->bottomHeight > BOT_H)
+        {
+            flbClose(&r->clip);
+            break;
+        }
+        LightEvent_Init(&r->wake, RESET_ONESHOT);
+        r->systemCore = core == 1;
+        r->thread = core == 1 ? threadCreate(bottomThread, r, 32 * 1024, prio < 0x3F ? prio + 1 : prio, 1, false)
+                              : threadCreate(bottomThread, r, 32 * 1024, prio + 2 <= 0x3F ? prio + 2 : 0x3F, -2, false);
+        if (r->thread == NULL)
+        {
+            flbClose(&r->clip);
+            continue;
+        }
+        if (a->readers == 0)
+        {
+            a->entryCount = info->entryCount;
+            a->fps = info->fps;
+        }
+        a->readers++;
+    }
+    // (What each entry shows, once there are readers; until then the wanted
+    // count is 0 and they wait.)
+    if (a->readers != 0 && (a->shown = malloc(a->entryCount * sizeof(u32))) != NULL)
+    {
+        u32 id = BOTTOM_START;
+        for (u32 e = 0; e < a->entryCount; e++)
+        {
+            if (a->reader[0].clip.entries[e].bottomSize != 0)
+                id = e;
+            a->shown[e] = id;
+        }
+        a->running = true;
+    }
+    else if (a->readers != 0)
+    {
+        a->running = true;  // (to be stopped)
+        bottomStop();
+    }
+}
+
+static void bottomStop(void)
+{
+    BottomAhead *a = &g_bottom;
+    if (!a->running)
+        return;
+    LightLock_Lock(&a->lock);
+    a->quit = true;
+    LightLock_Unlock(&a->lock);
+    for (u32 i = 0; i < a->readers; i++)
+    {
+        LightEvent_Signal(&a->reader[i].wake);
+        threadJoin(a->reader[i].thread, U64_MAX);
+        threadFree(a->reader[i].thread);
+        flbClose(&a->reader[i].clip);
+    }
+    free(a->shown);
+    a->shown = NULL;
+    a->readers = 0;
+    a->running = false;
+}
+
+// Asks for the pictures shown at entry 'entry' and the 'count' - 1 entries
+// after it (0: none), the part that plays being entries first .. last, going
+// round if 'loop'.
+static void bottomWant(u32 entry, u32 count, u32 first, u32 last, bool loop)
+{
+    BottomAhead *a = &g_bottom;
+    LightLock_Lock(&a->lock);
+    bool changed = a->want != entry || a->count != count || a->first != first || a->last != last || a->loop != loop;
+    a->want = entry;
+    a->count = count;
+    a->first = first;
+    a->last = last;
+    a->loop = loop;
+    LightLock_Unlock(&a->lock);
+    if (changed)
+        for (u32 i = 0; i < a->readers; i++)
+            LightEvent_Signal(&a->reader[i].wake);
+}
+
+// The picture shown at entry 'entry' (asked for last with bottomWant), upright,
+// if it's been read; its id in '*id'. NULL if it isn't there yet, or couldn't
+// be read ('error' then says why). It stays as it is until something else is
+// asked for.
+static const u16 *bottomGet(u32 entry, u32 *id, const char **error)
+{
+    BottomAhead *a = &g_bottom;
+    LightLock_Lock(&a->lock);
+    *id = a->shown[entry];
+    int b = bottomFind(a->held, *id);
+    if (b < 0 && *id == a->failed)
+        *error = a->error;
+    LightLock_Unlock(&a->lock);
+    return b >= 0 ? g_bottomBuf[b] : NULL;
+}
+
+// ---------------------------------------------------------------------------
 // Player
 
 static void playerRebase(Player *p)
@@ -1440,7 +1791,7 @@ static void audioFill(Player *p, int i)
     u32 n = total - p->audioNext < AUDIO_BUF_SAMPLES ? total - p->audioNext : AUDIO_BUF_SAMPLES;
     s16 *data = g_audioMem + i * AUDIO_BUF_SAMPLES * 2;
 
-    if (!flbReadAudio(&p->clip, p->clip.entries[0].audioPos + p->audioNext, n, data, &p->audioError))
+    if (!flbReadAudio(&p->clip, p->clip.entries[p->clip.firstShown].audioPos + p->audioNext, n, data, &p->audioError))
     {
         audioStop(p);
         return;
@@ -1576,15 +1927,18 @@ static bool playerOpen(Player *p, const Clip *c, const char **error)
         ndspChnSetMix(0, mix);
     }
 
-    // Mark where frames were missed (the copies of each stored frame).
+    // Mark where frames were missed: the last copies of a stored frame (all
+    // its copies, but in clips that store only what changes: there, the others
+    // are frames where nothing did).
     u32 count = p->clip.info.frameCount;
     for (u32 e = 0; e < p->clip.info.entryCount; e++)
     {
         const FlbEntry *entry = &p->clip.entries[e];
-        for (u32 k = 1; k < entry->copies; k++)
+        for (u32 k = entry->copies - entry->missed; k < entry->copies; k++)
             p->missed[(u64)(entry->firstFrame + k) * BAR_W / count] = 1;
     }
     aheadStart(path);
+    bottomStart(path);
     playerRebase(p);
     return true;
 }
@@ -1745,7 +2099,7 @@ static void drawPlayerStatic(const Player *p)
         row(25, C_NORMAL, " Touch the bar to jump");
         row(26, C_NORMAL, " B          Back to the clip list");
         row(27, C_NORMAL, " SELECT     Trim");
-        row(28, C_NORMAL, "");
+        row(28, C_NORMAL, p->clip.info.bottomWidth != 0 ? " Y          Bottom screen" : "");
     }
 }
 
@@ -1765,7 +2119,7 @@ static void drawPlayer(const Player *p)
               p->loop ? "on" : "off");
 
     const FlbEntry *entry = &p->clip.entries[p->shownEntry == UINT32_MAX ? 0 : p->shownEntry];
-    if (p->shownEntry != UINT32_MAX && p->frame > entry->firstFrame)
+    if (p->shownEntry != UINT32_MAX && entry->missed != 0 && p->frame >= entry->firstFrame + entry->copies - entry->missed)
         playerRow(8, C_WARN, " Missed frame (copy of the one before)");
     else
         playerRow(8, C_NORMAL, "");
@@ -1846,6 +2200,23 @@ static void drawPlayer(const Player *p)
 static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
 {
     u32 count = p->clip.info.frameCount, fps = p->clip.info.fps;
+
+    // With the clip's bottom screen up in place of the controls (Y, when the
+    // clip has one), any button brings them back, and does nothing else.
+    if (p->showBottom && down != 0)
+    {
+        p->showBottom = false;
+        p->touchWait = true;    // (if it was a touch, it isn't for the bar)
+        drawPlayerStatic(p);
+        down = repeat = 0;
+    }
+    else if ((down & KEY_Y) && !p->trimMode && !p->trimConfirm && !p->settingsOpen && p->clip.info.bottomWidth != 0)
+    {
+        p->showBottom = true;
+        p->bottomShown = UINT32_MAX;    // (not drawn yet: black until it is)
+        drawBottom(NULL, 0, 0);
+        down = repeat = 0;
+    }
 
     // Asking whether to save the selection: nothing else until it's answered.
     if (p->trimConfirm)
@@ -2005,9 +2376,10 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
     // While it plays, the frames after this one are read ahead too (paused,
     // stepping or scrubbing, just this one).
     u32 entry = flbEntryForFrame(&p->clip, p->frame);
+    u32 firstEntry = flbEntryForFrame(&p->clip, lo), lastEntry = flbEntryForFrame(&p->clip, hi - 1);
+    u32 ahead = p->playing && !p->scrubbing ? AHEAD_BUFS : 1;
     if (g_ahead.running && p->error == NULL)
-        aheadWant(entry, p->playing && !p->scrubbing ? AHEAD_BUFS : 1, flbEntryForFrame(&p->clip, lo),
-                  flbEntryForFrame(&p->clip, hi - 1), p->loop);
+        aheadWant(entry, ahead, firstEntry, lastEntry, p->loop);
     if (entry != p->shownEntry && p->error == NULL)
     {
         const u16 *frame = NULL;
@@ -2035,6 +2407,41 @@ static bool playerUpdate(Player *p, u32 down, u32 repeat, u32 held)
     }
     else if (p->error == NULL && p->shownEntry != UINT32_MAX && playerInputsStale(p))
         playerRedrawInputs(p);
+
+    // The clip's bottom screen, while it's up: as of the frame on the top
+    // screen, and only drawn again when it has changed. Read ahead, it's put
+    // up once it's there (playing, the top screen doesn't wait for it);
+    // otherwise it's read here, through the player's own handle on the clip.
+    bool bottomUp = p->showBottom && p->error == NULL && p->shownEntry == entry;
+    if (g_bottom.running)
+        bottomWant(entry, bottomUp ? (p->playing && !p->scrubbing ? BOTTOM_LOOK : 1) : 0, firstEntry, lastEntry, p->loop);
+    if (bottomUp && g_bottom.running)
+    {
+        u32 id;
+        const u16 *picture = bottomGet(entry, &id, &p->error);
+        if (picture != NULL && id != p->bottomShown)
+        {
+            drawBottom(picture, p->clip.info.bottomWidth, p->clip.info.bottomHeight);
+            p->bottomShown = id;
+        }
+    }
+    else if (bottomUp)
+    {
+        FlbClip *clip = &p->clip;
+        if (flbSeekScreens(clip, entry, false, true, &p->error) && clip->changes[FLB_BOTTOM] != p->bottomShown)
+        {
+            drawBottom(clip->known[FLB_BOTTOM] ? clip->picture[FLB_BOTTOM] : NULL, clip->info.bottomWidth,
+                       clip->info.bottomHeight);
+            p->bottomShown = clip->changes[FLB_BOTTOM];
+        }
+    }
+    // (What went wrong is said on the controls.)
+    if (p->showBottom && p->error != NULL)
+    {
+        p->showBottom = false;
+        p->playing = false;
+        drawPlayerStatic(p);
+    }
     return true;
 }
 
@@ -2052,6 +2459,8 @@ int main(void)
     g_frame = malloc(TOP_W * TOP_H * 2);
     for (int i = 0; i < AHEAD_BUFS; i++)
         g_aheadBuf[i] = malloc(TOP_W * TOP_H * 2);
+    for (int i = 0; i < BOTTOM_BUFS; i++)
+        g_bottomBuf[i] = malloc(BOT_W * BOT_H * 2);
     g_player.loop = true;
     g_player.showInputs = true;
 
@@ -2093,6 +2502,7 @@ int main(void)
                 u64 trimBytes = p->trimSave ? flbTrimSize(&p->clip, p->trimIn, trimFrames) : 0;
                 audioStop(p);
                 aheadStop();
+                bottomStop();
                 flbClose(&p->clip);
                 playing = false;
                 consoleClear();
@@ -2106,9 +2516,11 @@ int main(void)
             }
             else
             {
+                // (The controls aren't drawn while the clip's bottom screen is up in their place.)
                 playerAudio(&g_player);
                 u64 t0 = svcGetSystemTick();
-                drawPlayer(&g_player);
+                if (!g_player.showBottom)
+                    drawPlayer(&g_player);
                 g_player.textUs = (u32)((svcGetSystemTick() - t0) * 1000000 / SYSCLOCK_ARM11);
             }
         }
@@ -2363,6 +2775,7 @@ int main(void)
     {
         audioStop(&g_player);
         aheadStop();
+        bottomStop();
         flbClose(&g_player.clip);
     }
     if (g_ndsp)
@@ -2375,6 +2788,8 @@ int main(void)
         free(g_clips[i].thumb);
     for (int i = 0; i < AHEAD_BUFS; i++)
         free(g_aheadBuf[i]);
+    for (int i = 0; i < BOTTOM_BUFS; i++)
+        free(g_bottomBuf[i]);
     free(g_frame);
     free(g_clips);
     gfxExit();

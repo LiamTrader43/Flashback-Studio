@@ -31,7 +31,9 @@ namespace FlashbackStudio
     // nearest (as exports always were), each pixel becomes 2 x 2 here;
     // otherwise a second ffmpeg scales the frames (its scale filter), and they
     // come back here, so the input display is drawn at the video's size and
-    // stays sharp.
+    // stays sharp. A clip with a bottom screen can be exported with it: the
+    // video is then both screens as on a 3DS, the top one above, the bottom
+    // one centred under it (see PictureSize), scaled the same ways.
     static class Converter
     {
         // ffmpeg.exe next to this program (as it comes in the release), or else on
@@ -64,6 +66,20 @@ namespace FlashbackStudio
                 return (w * 2, h * 2);
             int vh = size == ExportSize.P1080 ? 1080 : size == ExportSize.P1440 ? 1440 : 2160;
             return ((vh * w / h + 1) & ~1, vh);     // (an even width, as H.264's 4:2:0 needs)
+        }
+
+        // The picture an export scales up, for 'clip': its top screen's frames,
+        // or with 'bottom', if it has a bottom screen, both screens: the top
+        // one, and the bottom one under it, centred, with black beside it
+        // (400 x 480 for a full resolution clip).
+        public static (int W, int H) PictureSize(FlbClip clip, bool bottom) =>
+            (clip.Width, bottom && clip.HasBottom ? clip.Height + clip.BottomHeight : clip.Height);
+
+        // An export's video's size, for 'clip' with its bottom screen or not.
+        public static (int W, int H) VideoSize(FlbClip clip, bool bottom, ExportSize size)
+        {
+            (int w, int h) = PictureSize(clip, bottom);
+            return VideoSize(w, h, size);
         }
 
         // ffmpeg's scale filter's flags, for each ExportScaling.
@@ -180,6 +196,39 @@ namespace FlashbackStudio
             }
         }
 
+        // The same, into a picture with 'stride' bytes a row, from (x0, y0) in it.
+        public static void Scale(ushort[] pixels, int w, int h, int k, byte[] frame, int stride, int x0, int y0)
+        {
+            for (int y = 0; y < h; y++)
+            {
+                int row = (y0 + y * k) * stride + x0 * 3, o = row;
+                for (int x = 0, s = y * w; x < w; x++, s++)
+                {
+                    ushort p = pixels[s];
+                    byte b = Five[p & 31], g = Six[(p >> 5) & 63], r = Five[p >> 11];
+                    for (int i = 0; i < k; i++)
+                    {
+                        frame[o] = b;
+                        frame[o + 1] = g;
+                        frame[o + 2] = r;
+                        o += 3;
+                    }
+                }
+                for (int i = 1; i < k; i++)
+                    Buffer.BlockCopy(frame, row, frame, row + i * stride, w * k * 3);
+            }
+        }
+
+        // Both of 'clip''s screens ('top' and 'bottom', RGB565) at 'k' times the
+        // size into 'frame' (BGR, PictureSize at 'k' times: the black beside the
+        // bottom screen is left as it is).
+        public static void Stack(FlbClip clip, ushort[] top, ushort[] bottom, int k, byte[] frame)
+        {
+            int stride = clip.Width * k * 3;
+            Scale(top, clip.Width, clip.Height, k, frame, stride, 0, 0);
+            Scale(bottom, clip.BottomWidth, clip.BottomHeight, k, frame, stride, (clip.Width - clip.BottomWidth) / 2 * k, clip.Height * k);
+        }
+
         // Exports 'clip' as the MP4 'mp4', replacing it if it exists, with ffmpeg
         // at 'ffmpeg', with the input display where 'inputs' says (if it isn't
         // null, and the clip has inputs). 'progress' is told how many frames are
@@ -189,6 +238,12 @@ namespace FlashbackStudio
         public static void ToMp4(FlbClip clip, string mp4, InputLayout? inputs, ExportSize size, ExportScaling scaling,
                                  ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
             ToMp4(clip, 0, clip.FrameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel);
+
+        // The same, with the bottom screen under the top one if 'bottom' (and
+        // the clip has one).
+        public static void ToMp4(FlbClip clip, string mp4, InputLayout? inputs, bool bottom, ExportSize size, ExportScaling scaling,
+                                 ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
+            ToMp4(clip, 0, clip.FrameCount, mp4, inputs, bottom, size, scaling, encoder, ffmpeg, progress, cancel);
 
         // The same, for frames firstFrame .. firstFrame + frameCount - 1 of it
         // (a trimmed part), with their sound. A Discord export goes through the
@@ -205,11 +260,22 @@ namespace FlashbackStudio
         // The same, a Discord export fitting in 'limit' bytes (for the tests).
         public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
-                                 Action<int> progress, CancellationToken cancel, long limit)
+                                 Action<int> progress, CancellationToken cancel, long limit) =>
+            ToMp4(clip, firstFrame, frameCount, mp4, inputs, false, size, scaling, encoder, ffmpeg, progress, cancel, limit);
+
+        // The same, with the bottom screen under the top one if 'bottom' (and
+        // the clip has one). The input display stays on the top screen, as big
+        // as on a video of the top screen alone.
+        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs, bool bottom,
+                                 ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
+                                 Action<int> progress, CancellationToken cancel, long limit = DiscordLimit)
         {
-            (int w, int h) = VideoSize(clip.Width, clip.Height, size);
+            bool both = bottom && clip.HasBottom;
+            (int w, int h) = VideoSize(clip, both, size);
             bool here = (size == ExportSize.Double || size == ExportSize.Discord) && scaling == ExportScaling.Nearest;     // (each pixel 2 x 2, here)
-            InputOverlay overlay = inputs.HasValue && clip.Inputs != null ? new InputOverlay(w, h, inputs.Value) : null;
+            // (The top screen's part of the video: all of it, or its top rows.)
+            int topH = both ? h * clip.Height / (clip.Height + clip.BottomHeight) : h;
+            InputOverlay overlay = inputs.HasValue && clip.Inputs != null ? new InputOverlay(w, topH, inputs.Value) : null;
             string part = mp4 + ".part";     // the MP4, until it's finished
             string wav = null, stats = null;
             bool done = false;
@@ -226,7 +292,7 @@ namespace FlashbackStudio
                 // The frames through ffmpeg, with 'output' after their input on
                 // its command line, 'before' frames already done.
                 void Pass(string output, int before) =>
-                    Encode(clip, firstFrame, frameCount, w, h, here, scaling, overlay, ffmpeg, InputArgs(w, h, clip.Fps) + output,
+                    Encode(clip, firstFrame, frameCount, both, w, h, here, scaling, overlay, ffmpeg, InputArgs(w, h, clip.Fps) + output,
                            n => progress(before + n), cancel);
 
                 if (size == ExportSize.Discord)
@@ -292,12 +358,13 @@ namespace FlashbackStudio
             }
         }
 
-        // Sends frames firstFrame .. firstFrame + frameCount - 1 of 'clip', w x h
-        // (scaled here if 'here', each pixel 2 x 2, or else by a second ffmpeg,
-        // with 'scaling'), with the input display drawn over them by 'overlay'
-        // (if it isn't null), to an ffmpeg started with 'args', and waits for it
-        // to finish. 'progress' is told how many frames are done, now and then.
-        static void Encode(FlbClip clip, int firstFrame, int frameCount, int w, int h, bool here, ExportScaling scaling,
+        // Sends frames firstFrame .. firstFrame + frameCount - 1 of 'clip' (both
+        // its screens, if 'both'), w x h (scaled here if 'here', each pixel 2 x 2,
+        // or else by a second ffmpeg, with 'scaling'), with the input display
+        // drawn over them by 'overlay' (if it isn't null), to an ffmpeg started
+        // with 'args', and waits for it to finish. 'progress' is told how many
+        // frames are done, now and then.
+        static void Encode(FlbClip clip, int firstFrame, int frameCount, bool both, int w, int h, bool here, ExportScaling scaling,
                            InputOverlay overlay, string ffmpeg, string args, Action<int> progress, CancellationToken cancel)
         {
             Process p = null, scaler = null;
@@ -311,20 +378,21 @@ namespace FlashbackStudio
                 // The frames before the input display: scaled here, or sent to the
                 // scaler by the feeder thread (with how many times each is shown)
                 // and read back from it.
-                IEnumerator<(ushort[] Pixels, int Copies)> frames = null;
+                IEnumerator<(ushort[] Top, ushort[] Bottom, int Copies)> frames = null;
                 BlockingCollection<int> sent = null;
                 Stream scaled = null;
                 if (here)
-                    frames = clip.Frames(firstFrame, frameCount).GetEnumerator();
+                    frames = clip.Moments(firstFrame, frameCount, both).GetEnumerator();
                 else
                 {
-                    scaler = StartFfmpeg(ffmpeg, InputArgs(clip.Width, clip.Height, clip.Fps) +
+                    (int pw, int ph) = PictureSize(clip, both);
+                    scaler = StartFfmpeg(ffmpeg, InputArgs(pw, ph, clip.Fps) +
                                          $"-vf scale={w}:{h}:flags={ScaleFlags[(int)scaling]} -f rawvideo -pix_fmt bgr24 -",
                                          true, scalerErrors);
                     scaled = scaler.StandardOutput.BaseStream;
                     sent = new BlockingCollection<int>();
                     Stream toScaler = scaler.StandardInput.BaseStream;
-                    feeder = new Thread(() => fed = Feed(clip, firstFrame, frameCount, toScaler, sent))
+                    feeder = new Thread(() => fed = Feed(clip, firstFrame, frameCount, both, toScaler, sent))
                     {
                         IsBackground = true,
                         Name = "frames to scale",
@@ -343,7 +411,10 @@ namespace FlashbackStudio
                     {
                         if (!frames.MoveNext())
                             break;
-                        Scale(frames.Current.Pixels, clip.Width, clip.Height, 2, clean);
+                        if (both)
+                            Stack(clip, frames.Current.Top, frames.Current.Bottom, 2, clean);
+                        else
+                            Scale(frames.Current.Top, clip.Width, clip.Height, 2, clean);
                         copies = frames.Current.Copies;
                     }
                     else
@@ -483,18 +554,22 @@ namespace FlashbackStudio
             }
         }
 
-        // The feeder thread: sends the clip's stored frames (BGR, at its size) to
-        // the scaler's input, after adding how many times each is shown to
-        // 'sent', and then closes both. Returns what stopped it early (a damaged
-        // frame, or the scaler gone), or null.
-        static Exception Feed(FlbClip clip, int firstFrame, int frameCount, Stream toScaler, BlockingCollection<int> sent)
+        // The feeder thread: sends the clip's stored frames (BGR, at its size;
+        // both its screens, if 'both') to the scaler's input, after adding how
+        // many times each is shown to 'sent', and then closes both. Returns
+        // what stopped it early (a damaged frame, or the scaler gone), or null.
+        static Exception Feed(FlbClip clip, int firstFrame, int frameCount, bool both, Stream toScaler, BlockingCollection<int> sent)
         {
             try
             {
-                byte[] frame = new byte[clip.Width * clip.Height * 3];
-                foreach ((ushort[] pixels, int copies) in clip.Frames(firstFrame, frameCount))
+                (int pw, int ph) = PictureSize(clip, both);
+                byte[] frame = new byte[pw * ph * 3];
+                foreach ((ushort[] pixels, ushort[] bottom, int copies) in clip.Moments(firstFrame, frameCount, both))
                 {
-                    Scale(pixels, clip.Width, clip.Height, 1, frame);
+                    if (both)
+                        Stack(clip, pixels, bottom, 1, frame);
+                    else
+                        Scale(pixels, clip.Width, clip.Height, 1, frame);
                     sent.Add(copies);
                     toScaler.Write(frame, 0, frame.Length);
                 }

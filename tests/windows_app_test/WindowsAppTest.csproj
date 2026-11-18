@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The Windows app test (see ../README.md): WindowsAppTest.cs, with the
-       app's own clip reader, compactor, input display and export. -->
+  <!-- The Windows app test (see ../README.md): WindowsAppTest.cs and
+       ScreensTest.cs, with the app's own clip reader, compactor, input display
+       and export. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net48</TargetFramework>
@@ -13,6 +14,7 @@
 
   <ItemGroup>
     <Compile Include="WindowsAppTest.cs" />
+    <Compile Include="ScreensTest.cs" />
     <Compile Include="..\..\windows-app\FlbClip.cs" />
     <Compile Include="..\..\windows-app\FlbCompactor.cs" />
     <Compile Include="..\..\windows-app\InputOverlay.cs" />

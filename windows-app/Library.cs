@@ -15,14 +15,16 @@ namespace FlashbackStudio
         public string Path, Name;
         public string Error;            // why it can't be played, or null
         public int Width, Height, Fps, FrameCount, EntryCount;
+        public int BottomHeight;        // its bottom screen's frames' (0: it has none)
+        public int MissedFrames;        // frames that are copies because their capture was missed
         public bool HasAudio, HasInputs, IsCompacted, IsRaw;
+        public bool HasBottom => BottomHeight != 0;
         public long FileSize;
         public long CompactSize;        // its size once compacted
         public Bitmap Thumb;            // its first frame, small, once read...
         public bool ThumbFailed;        // ...or if that failed
 
         public string Mp4 => System.IO.Path.ChangeExtension(Path, ".mp4");
-        public int MissedFrames => FrameCount - EntryCount;
     }
 
     // The clips in a folder (like the 3DS app's sd:/luma/flashback/), and their
@@ -69,6 +71,8 @@ namespace FlashbackStudio
                     c.Fps = clip.Fps;
                     c.FrameCount = clip.FrameCount;
                     c.EntryCount = clip.EntryCount;
+                    c.MissedFrames = clip.MissedFrames;
+                    c.BottomHeight = clip.BottomHeight;
                     c.HasAudio = clip.HasAudio;
                     c.HasInputs = clip.Inputs != null;
                     c.IsCompacted = clip.IsCompacted;
@@ -182,7 +186,7 @@ namespace FlashbackStudio
                 {
                     using (FlbClip clip = FlbClip.Open(c.Path))
                     {
-                        clip.DecodeEntry(0, frame);
+                        clip.DecodeEntry(clip.EntryForFrame(0), frame);
                         thumb = Library.Shrink(frame, clip.Width, clip.Height, tw, th);
                     }
                 }

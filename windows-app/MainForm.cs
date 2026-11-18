@@ -42,6 +42,7 @@ namespace FlashbackStudio
 
         // Exporting
         bool exportInputs = true, exportReplace;
+        bool exportBottom = true;       // the bottom screen under the top one, for clips that have one, remembered
         ExportSize exportSize;          // the video's size...
         ExportScaling exportScaling;    // ...how it's scaled up to it...
         ExportEncoder exportEncoder;    // ...and what encodes it, remembered
@@ -256,6 +257,8 @@ namespace FlashbackStudio
                         exportEncoder = encoder;
                     else if (name == "inputs" && InputLayout.TryParse(value, out InputLayout layout))
                         inputLayout = layout;
+                    else if (name == "bottom")
+                        exportBottom = value != "off";
                     else if (name == "window")
                     {
                         // x, y, width, height, and 1 if it was maximized
@@ -282,7 +285,7 @@ namespace FlashbackStudio
                 Rectangle w = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
                 File.WriteAllLines(SettingsFile, new[] { "folder=" + folder, "volume=" + volume, "export=" + exportFolder,
                                                          "size=" + exportSize, "scaling=" + exportScaling, "encoder=" + exportEncoder,
-                                                         "inputs=" + inputLayout,
+                                                         "inputs=" + inputLayout, "bottom=" + (exportBottom ? "on" : "off"),
                                                          $"window={w.X},{w.Y},{w.Width},{w.Height},{(WindowState == FormWindowState.Maximized ? 1 : 0)}" });
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -427,7 +430,7 @@ namespace FlashbackStudio
             bottom.Invalidate();
         }
 
-        // The selected clip's first frame on the top screen.
+        // The selected clip's first frame on the top screen (its top screen's).
         void ShowPreview()
         {
             ClipInfo c = Selected;
@@ -441,7 +444,7 @@ namespace FlashbackStudio
                 using (FlbClip clip = FlbClip.Open(c.Path))
                 {
                     ushort[] frame = new ushort[clip.Width * clip.Height];
-                    clip.DecodeEntry(0, frame);
+                    clip.DecodeEntry(clip.EntryForFrame(0), frame);
                     top.Show(frame, clip.Width, clip.Height, null);
                 }
             }
@@ -589,14 +592,29 @@ namespace FlashbackStudio
                 case Mode.ConfirmExport:
                 {
                     bool part = exportCount < c.FrameCount;
-                    p.Text(d, 1, Style.Info, part ? "Export the selection as an MP4?" : "Export this clip as an MP4?");
+                    string question = part ? "Export the selection as an MP4?" : "Export this clip as an MP4?";
+                    string length = $"{Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")} ";
+                    p.Text(d, 1, Style.Info, question);
                     p.Text(d + 1, 1, Style.Normal, "Name");
                     exportNameBox.Bounds = Rectangle.Inflate(p.Cells(d + 1, 8, BottomScreen.Cols - 13), 0, -1);
                     p.Text(d + 1, BottomScreen.Cols - 4, Style.Dim, ".mp4");
                     PaintExportFolder(p, d + 2, "next to the clip");
                     PaintVideoChoices(p, d + 3, c);
-                    PaintInputsChoice(p, d + 4, c.HasInputs);
-                    p.Right(d + 4, Style.Normal, $"{Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")} ");
+                    if (c.HasBottom)
+                    {
+                        // The bottom screen's choice goes after the input display's,
+                        // and the length by the question (without the sound, if
+                        // there isn't room for it there).
+                        PaintBottomChoice(p, d + 4, PaintInputsChoice(p, d + 4, true) + 2);
+                        if (1 + question.Length + 2 + length.Length > BottomScreen.Cols)
+                            length = Names.Length(exportCount, c.Fps) + " ";
+                        p.Right(d, Style.Normal, length);
+                    }
+                    else
+                    {
+                        PaintInputsChoice(p, d + 4, c.HasInputs);
+                        p.Right(d + 4, Style.Normal, length);
+                    }
                     PaintEncoderChoice(p, d + 5);
                     string problem = ExportProblem();
                     if (problem != null)
@@ -613,7 +631,7 @@ namespace FlashbackStudio
                     PaintExportFolder(p, d + 1, "next to each clip");
                     p.Text(d + 2, 1, Style.Dim, "Each MP4 is named after its clip.");
                     PaintVideoChoices(p, d + 3, null);
-                    PaintInputsChoice(p, d + 4, true);
+                    PaintBottomChoice(p, d + 4, PaintInputsChoice(p, d + 4, true) + 2);
                     PaintEncoderChoice(p, d + 5);
                     string problem = ExportFolderProblem();
                     if (problem != null)
@@ -653,7 +671,10 @@ namespace FlashbackStudio
                     p.Text(d + 3, 1, Style.Normal, c.MissedFrames == 0 ? "No missed frames" : $"Missed frames: {c.MissedFrames} (shown as copies)");
                     p.Text(d + 4, 1, Style.Dim, c.IsRaw ? "From an older Flashback build (.raw)" : c.IsCompacted ? "Compacted" :
                                                  $"Not compacted ({Names.Size(c.CompactSize)} once compacted)");
-                    if (message == null)
+                    if (message == null && c.HasBottom)
+                        p.Text(d + 5, 1, Style.Dim, (c.HasInputs ? "Both screens and inputs recorded" : "Both screens recorded, no inputs") +
+                                                    (HasMp4(c) ? "; has an MP4" : ""));
+                    else if (message == null)
                         p.Text(d + 5, 1, Style.Dim, (c.HasInputs ? "Inputs recorded" : "No inputs recorded") +
                                                     (HasMp4(c) ? "; exported (has an MP4)" : ""));
                 }
@@ -683,16 +704,19 @@ namespace FlashbackStudio
         static readonly string[] ScalingNames = { "Nearest", "Bilinear", "Bicubic", "Lanczos", "Spline" };
 
         // The video's size and how it's scaled up: two dropdowns. (Twice the size
-        // is clip 'c''s, or if it's null, any clip's.)
+        // is clip 'c''s, or if it's null, any clip's. With its bottom screen
+        // under the top one, if it has one and that's chosen, the sizes are
+        // those of both.)
         void PaintVideoChoices(Painter p, int r, ClipInfo c)
         {
-            string twice = c != null ? $"{c.Width * 2}x{c.Height * 2}" : "2x";
+            bool both = c != null && c.HasBottom && exportBottom;
+            string twice = c != null ? $"{c.Width * 2}x{(c.Height + (both ? c.BottomHeight : 0)) * 2}" : "2x";
             string[] sizes = { twice, "1080p", "1440p", "4K", "Discord" };
             string[] items = new string[sizes.Length];
             items[0] = c != null ? twice + " (2x)" : "2x the clip's size";
             for (int i = 1; i < (int)ExportSize.Discord; i++)
             {
-                (int w, int h) = Converter.VideoSize(400, 240, (ExportSize)i);
+                (int w, int h) = Converter.VideoSize(400, both ? 480 : 240, (ExportSize)i);
                 items[i] = $"{sizes[i]} ({w}x{h})";
             }
             items[(int)ExportSize.Discord] = $"Discord ({twice}, under {Names.Size(Converter.DiscordLimit)})";
@@ -732,13 +756,24 @@ namespace FlashbackStudio
                 p.Text(r, col + 1, Style.Dim, "(no NVIDIA card found)");
         }
 
-        void PaintInputsChoice(Painter p, int r, bool any)
+        // (Returns the column after it.)
+        int PaintInputsChoice(Painter p, int r, bool any)
         {
             const string label = "Input display: ";
             p.Text(r, 1, Style.Normal, label);
             int col = Choice(p, r, 1 + label.Length, exportInputs ? "on" : "off", ToggleExportInputs, exportInputs);
             if (!any)
                 p.Text(r, col + 1, Style.Dim, "(no inputs in this clip)");
+            return col;
+        }
+
+        // Whether exports have the bottom screen under the top one (for clips
+        // that have one), from column 'col'.
+        void PaintBottomChoice(Painter p, int r, int col)
+        {
+            const string label = "Bottom screen: ";
+            p.Text(r, col, Style.Normal, label);
+            Choice(p, r, col + label.Length, exportBottom ? "on" : "off", ToggleExportBottom, exportBottom);
         }
 
         // A tile: a thumbnail of the clip's first frame in a thin frame, or on a
@@ -1118,6 +1153,13 @@ namespace FlashbackStudio
             bottom.Invalidate();
         }
 
+        void ToggleExportBottom()
+        {
+            exportBottom = !exportBottom;
+            SaveSettings();
+            bottom.Invalidate();
+        }
+
         void ToggleExportReplace()
         {
             exportReplace = !exportReplace;
@@ -1182,6 +1224,7 @@ namespace FlashbackStudio
         {
             string ffmpeg = Converter.FindFfmpeg();
             InputLayout? inputs = exportInputs ? inputLayout : (InputLayout?)null;     // (as the player shows it)
+            bool both = exportBottom;       // (for clips with a bottom screen)
             ExportSize size = exportSize;
             ExportScaling scaling = exportScaling;
             // (The GPU if it can encode here: if that isn't known yet, the job
@@ -1201,7 +1244,7 @@ namespace FlashbackStudio
                     {
                         ExportEncoder encoder = Encoder();
                         using (FlbClip clip = FlbClip.Open(path))
-                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, size, scaling, encoder, ffmpeg,
+                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, both, size, scaling, encoder, ffmpeg,
                                             done => Progress((double)done / ((double)count * passes), FramesDone(done, count, passes)), token);
                     }
                     catch (OperationCanceledException)
@@ -1241,7 +1284,7 @@ namespace FlashbackStudio
                     try
                     {
                         using (FlbClip clip = FlbClip.Open(c.Path))
-                            Converter.ToMp4(clip, TargetMp4(c), inputs, size, scaling, encoder, ffmpeg,
+                            Converter.ToMp4(clip, TargetMp4(c), inputs, both, size, scaling, encoder, ffmpeg,
                                             done => Progress((before + done) / (double)total, FramesDone(done, c.FrameCount, passes)), token);
                         exported++;
                     }
@@ -1457,7 +1500,7 @@ namespace FlashbackStudio
             if (player.ShownEntry < 0)
                 return;
             FlbInput? input = InputsShown ? clip.Inputs[player.Frame] : (FlbInput?)null;
-            player.DrawMs = top.Show(player.Pixels, clip.Width, clip.Height, input);
+            player.DrawMs = top.Show(player.Pixels, clip.Width, clip.Height, input, player.Bottom, clip.BottomWidth, clip.BottomHeight);
         }
 
         // The input display's colour, chosen in Windows' colour picker.
@@ -1636,7 +1679,7 @@ namespace FlashbackStudio
             }
             FlbClip clip = pl.Clip;
             for (int e = 0; e < clip.EntryCount; e++)
-                for (int k = 1; k < clip[e].Copies; k++)
+                for (int k = clip[e].Copies - clip[e].Missed; k < clip[e].Copies; k++)
                     p.Fill(new Rectangle(bar.X + BarPixel(clip[e].FirstFrame + k, w), tickY, Math.Max(1, S(1)), tickH), Theme.Missed);
             int mark = Math.Max(2, S(2)), playhead = Math.Max(3, S(3));
             if (pl.TrimMode)

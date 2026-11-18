@@ -1,6 +1,6 @@
 /* PC test of Flashback Studio's decoding of frames packed with Huffman codes
    (3ds-app/source/flb.c, built as it is), with frames made as the recorder
-   makes them (a copy of its compression, below):
+   makes them (a copy of its compression, recorder_copy.h):
    - frames of many kinds, at both resolutions, packed one after another as
      recording does (each frame's codes from the counts of the frame before),
      must decode to exactly the frame, and so must their ops unpacked;
@@ -19,270 +19,10 @@
 static long errors, checks;
 #define FAIL(...) do { errors++; if (errors < 30) printf("  ERROR: " __VA_ARGS__); } while (0)
 
-/* ---------------------------------------------------------------------------
-   A copy of the recorder's compression (flashbackPackPixels, flashbackHuffLengths,
-   flashbackHuffCodes and flashbackHuffman in Luma3DS-Flashback's
-   sysmodules/rosalina/source/flashback_compress.c), for frames that are upright
-   here. Keep it in step with the original.
-   --------------------------------------------------------------------------- */
-typedef uint8_t u8;
-typedef uint16_t u16;
-typedef uint32_t u32;
-typedef int32_t s32;
+/* The recorder's compression: a copy (recorder_copy.h), shared with screens_test.c. */
+#include "recorder_copy.h"
 
-#define FLASHBACK_PACK_RUN_MAX  62
-#define FLASHBACK_PACK_RAW      0xFE
-#define FLASHBACK_HUFF_MAX_BITS 12
-#define FLASHBACK_HUFF_HEADER   264
-#define FLASHBACK_HUFF_BLOCK    64
-
-typedef struct FlashbackPackState { u32 *index; u8 *out; u32 prev; u32 run; } FlashbackPackState;
-typedef struct FlashbackHuffman {
-    u32 counts[2][256];
-    u32 codes[2][256];
-    u32 order[256];
-    u32 weight[511];
-    u16 parent[511];
-    u8  depth[511];
-} FlashbackHuffman;
-static FlashbackHuffman g_huffState, *g_huff = &g_huffState;
-
-static inline u32 flashbackPackHash(u32 px) { return (px * 0x9E3779B1u) >> 26; }
-
-static bool flashbackPackPixels(const u16 *src, u32 n, u32 step, FlashbackPackState *st, const u8 *limit)
-{
-    u32 *index = st->index;
-    u32 prev = st->prev;
-    u32 run = st->run;
-    u8 *out = st->out;
-    const u16 *end = src + n * step;
-
-    for (; src != end; src += step)
-    {
-        u32 px = *src;
-        if (px == prev)
-        {
-            if (++run == FLASHBACK_PACK_RUN_MAX)
-            {
-                if (out > limit)
-                    return false;
-                *out++ = 0xC0 | (FLASHBACK_PACK_RUN_MAX - 1);
-                run = 0;
-            }
-            continue;
-        }
-
-        if (out > limit)
-            return false;
-        if (run != 0)
-        {
-            *out++ = (u8)(0xBF + run);      // 0xC0 | (run - 1)
-            run = 0;
-        }
-
-        u32 h = flashbackPackHash(px);
-        if (index[h] == px)
-        {
-            *out++ = (u8)h;
-            prev = px;
-            continue;
-        }
-        index[h] = px;
-
-        s32 dr = (s32)(((px >> 11) - (prev >> 11)) << 27) >> 27;
-        s32 dg = (s32)(((px >> 5) - (prev >> 5)) << 26) >> 26;
-        s32 db = (s32)((px - prev) << 27) >> 27;
-
-        if ((u32)((dr + 2) | (dg + 2) | (db + 2)) < 4)
-            *out++ = (u8)(0x40 + 0x2A + (dr << 4) + (dg << 2) + db);    // 0x40 | (dr+2)<<4 | (dg+2)<<2 | (db+2)
-        else
-        {
-            s32 tr = dr - (dg >> 1), tb = db - (dg >> 1);
-            if ((u32)((tr + 8) | (tb + 8)) < 16)
-            {
-                out[0] = (u8)(0x80 + 32 + dg);                      // 0x80 | (dg + 32)
-                out[1] = (u8)(0x88 + (tr << 4) + tb);               // (tr+8)<<4 | (tb+8)
-                out += 2;
-            }
-            else
-            {
-                out[0] = FLASHBACK_PACK_RAW;
-                out[1] = (u8)px;
-                out[2] = (u8)(px >> 8);
-                out += 3;
-            }
-        }
-        prev = px;
-    }
-
-    st->prev = prev;
-    st->run = run;
-    st->out = out;
-    return true;
-}
-
-/* flashbackCompress, for an upright frame: its ops, or 0 if they wouldn't be
-   smaller than 'cap' bytes. */
-static u32 compressFrame(const u16 *up, u32 width, u32 height, u8 *dst, u32 cap)
-{
-    u32 index[64];
-    memset(index, 0, sizeof(index));
-    FlashbackPackState st = { index, dst, 0, 0 };
-    const u8 *limit = dst + cap - 4;
-    for (u32 y = 0; y < height; y++)
-        if (!flashbackPackPixels(up + y * width, width, 1, &st, limit))
-            return 0;
-    if (st.run != 0)
-    {
-        if (st.out > limit)
-            return 0;
-        *st.out++ = 0xC0 | (st.run - 1);
-    }
-    return (u32)(st.out - dst);
-}
-
-static void flashbackHuffLengths(const u32 *counts, u8 *lengths)
-{
-    FlashbackHuffman *h = g_huff;
-    u32 *order = h->order, *weight = h->weight;
-
-    for (u32 v = 0; v < 256; v++)
-        order[v] = (counts[v] + 1) << 8 | v;
-    static const u8 gaps[] = { 132, 57, 23, 10, 4, 1 };
-    for (u32 g = 0; g < sizeof(gaps); g++)
-        for (u32 i = gaps[g]; i < 256; i++)
-        {
-            u32 key = order[i], j = i;
-            for (; j >= gaps[g] && order[j - gaps[g]] > key; j -= gaps[g])
-                order[j] = order[j - gaps[g]];
-            order[j] = key;
-        }
-
-    for (u32 i = 0; i < 256; i++)
-        weight[i] = order[i] >> 8;
-    u32 leaf = 0, node = 256;
-    for (u32 made = 256; made < 511; made++)
-    {
-        u32 a = leaf < 256 && (node == made || weight[leaf] <= weight[node]) ? leaf++ : node++;
-        u32 b = leaf < 256 && (node == made || weight[leaf] <= weight[node]) ? leaf++ : node++;
-        weight[made] = weight[a] + weight[b];
-        h->parent[a] = h->parent[b] = (u16)made;
-    }
-    h->depth[510] = 0;
-    for (u32 i = 510; i-- != 0;)
-        h->depth[i] = h->depth[h->parent[i]] + 1;
-
-    u32 perLength[FLASHBACK_HUFF_MAX_BITS + 1] = { 0 };
-    for (u32 i = 0; i < 256; i++)
-        perLength[h->depth[i] < FLASHBACK_HUFF_MAX_BITS ? h->depth[i] : FLASHBACK_HUFF_MAX_BITS]++;
-    u32 space = 0;
-    for (u32 n = 1; n <= FLASHBACK_HUFF_MAX_BITS; n++)
-        space += perLength[n] << (FLASHBACK_HUFF_MAX_BITS - n);
-    for (; space > 1u << FLASHBACK_HUFF_MAX_BITS; space--)
-    {
-        perLength[FLASHBACK_HUFF_MAX_BITS]--;
-        for (u32 n = FLASHBACK_HUFF_MAX_BITS - 1; n > 0; n--)
-            if (perLength[n] != 0)
-            {
-                perLength[n]--;
-                perLength[n + 1] += 2;
-                break;
-            }
-    }
-
-    u32 i = 0;
-    for (u32 n = FLASHBACK_HUFF_MAX_BITS; n > 0; n--)
-        for (u32 k = perLength[n]; k != 0; k--)
-            lengths[order[i++] & 0xFF] = (u8)n;
-}
-
-static void flashbackHuffCodes(const u8 *lengths, u32 *codes)
-{
-    u32 perLength[FLASHBACK_HUFF_MAX_BITS + 1] = { 0 }, next[FLASHBACK_HUFF_MAX_BITS + 1];
-    for (u32 v = 0; v < 256; v++)
-        perLength[lengths[v]]++;
-    u32 code = 0;
-    for (u32 n = 1; n <= FLASHBACK_HUFF_MAX_BITS; n++)
-    {
-        code = (code + perLength[n - 1]) << 1;
-        next[n] = code;
-    }
-    for (u32 v = 0; v < 256; v++)
-    {
-        u32 n = lengths[v], c = next[n]++, reversed = 0;
-        for (u32 k = 0; k < n; k++)
-            reversed = reversed << 1 | (c >> k & 1);
-        codes[v] = reversed | n << 16;
-    }
-}
-
-static u32 flashbackHuffman(const u8 *src, u32 len, u8 *dst)
-{
-    if (len <= FLASHBACK_HUFF_HEADER + 2 * FLASHBACK_HUFF_BLOCK)
-        return 0;
-
-    FlashbackHuffman *h = g_huff;
-    u8 lengths[256];
-    dst[0] = 0xFF;
-    dst[1] = 1;
-    dst[2] = dst[3] = 0;
-    memcpy(dst + 4, &len, 4);
-    for (u32 set = 0; set < 2; set++)
-    {
-        flashbackHuffLengths(h->counts[set], lengths);
-        flashbackHuffCodes(lengths, h->codes[set]);
-        for (u32 v = 0; v < 256; v += 2)
-            dst[8 + set * 128 + v / 2] = (u8)(lengths[v] | lengths[v + 1] << 4);
-    }
-    memset(h->counts, 0, sizeof(h->counts));
-
-    u32 *opCounts = h->counts[0], *argCounts = h->counts[1];
-    const u32 *opCodes = h->codes[0], *argCodes = h->codes[1];
-    const u8 *p = src, *end = src + len;
-    u16 *out = (u16 *)(dst + FLASHBACK_HUFF_HEADER);
-    const u16 *last = (const u16 *)(dst + len - (FLASHBACK_HUFF_BLOCK + 2) * 3 / 2 - 2 - 1);
-    u32 bits = 0, n = 0;
-    while (p < end)
-    {
-        if (out > last)
-            return 0;
-        const u8 *stop = (u32)(end - p) > FLASHBACK_HUFF_BLOCK ? p + FLASHBACK_HUFF_BLOCK : end;
-        do
-        {
-            u32 b = *p++;
-            opCounts[b]++;
-            u32 c = opCodes[b];
-            bits |= (c & 0xFFFF) << n;
-            n += c >> 16;
-            if (n >= 16)
-            {
-                *out++ = (u16)bits;
-                bits >>= 16;
-                n -= 16;
-            }
-            if (b - 0x80 < 0x40 || b == FLASHBACK_PACK_RAW)
-            {
-                for (u32 k = b == FLASHBACK_PACK_RAW ? 2 : 1; k != 0; k--)
-                {
-                    b = *p++;
-                    argCounts[b]++;
-                    c = argCodes[b];
-                    bits |= (c & 0xFFFF) << n;
-                    n += c >> 16;
-                    if (n >= 16)
-                    {
-                        *out++ = (u16)bits;
-                        bits >>= 16;
-                        n -= 16;
-                    }
-                }
-            }
-        } while (p < stop);
-    }
-    if (n != 0)
-        *out++ = (u16)bits;
-    return (u32)((u8 *)out - dst);
-}
+static FlashbackHuffman g_huffState;
 
 /* ---------------------------------------------------------------------------
    Frames
@@ -372,7 +112,7 @@ static uint32_t writeClip(const char *path, bool audio, uint32_t *packed)
     {
         makeFrame(g_clipFrames[e], CLIP_W, CLIP_H, e < 8 ? GAME : e < 16 ? TEXTURE : e % 4 == 0 ? NOISE : FLAT, e);
         uint32_t n = compressFrame(g_clipFrames[e], CLIP_W, CLIP_H, ops, CLIP_SLOT);
-        uint32_t len = n ? flashbackHuffman(ops, n, coded) : 0;
+        uint32_t len = n ? flashbackHuffman(&g_huffState, ops, n, coded) : 0;
         const void *data = len ? (const void *)coded : n ? (const void *)ops : (const void *)g_clipFrames[e];
         sizes[e] = len ? len : n ? n : CLIP_SLOT;
         *packed += len != 0;
@@ -467,7 +207,7 @@ int main(void)
         checks++;
         if (!flbDecompress(ops, n, back, pixels, &codes) || memcmp(back, up, pixels * 2) != 0)
             FAIL("frame %d: its ops don't decode to it\n", f);
-        u32 len = flashbackHuffman(ops, n, coded);
+        u32 len = flashbackHuffman(&g_huffState, ops, n, coded);
         if (len == 0)
             continue;
         packed++;

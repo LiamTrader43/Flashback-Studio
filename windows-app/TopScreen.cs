@@ -11,7 +11,9 @@ namespace FlashbackStudio
     // middle of black, with the input display over it if asked, where its
     // InputsAt says. While it's Editing (the player's settings are open), the
     // input display has a frame around it, and can be dragged to move it, or by
-    // a corner to resize it.
+    // a corner to resize it. A clip's bottom screen, if it's given one, goes
+    // under the frame, centred, as on a 3DS (and the scale is then the biggest
+    // that fits both).
     sealed class TopScreen : Control
     {
         [StructLayout(LayoutKind.Sequential)]
@@ -28,9 +30,11 @@ namespace FlashbackStudio
 
         ushort[] pixels;            // the frame shown (null: none)
         int clipW, clipH;
+        ushort[] bottom;            // the bottom screen's, under it (null: none)
+        int bottomW, bottomH;
         FlbInput? input;            // its inputs, if the display is to be drawn
-        byte[] bgr;                 // it, drawn at 'scale'
-        int scale, bgrW, bgrH;
+        byte[] bgr;                 // it, drawn at 'scale' (bgrW x bgrH), with the bottom screen's under it (bgrW x allH in all)
+        int scale, bgrW, bgrH, allH;
         InputOverlay overlay;
         InputLayout layout = InputLayout.Default;
         bool editing;
@@ -86,13 +90,14 @@ namespace FlashbackStudio
 
         int S(int px) => px * DeviceDpi / 96;
 
-        // How many times 400 x 240 it shows the frame.
-        int ScreenScale => Math.Max(1, Math.Min(ClientSize.Width / 400, ClientSize.Height / 240));
+        // How many times 400 x 240 it shows the frame (400 x 480, with a bottom screen under it).
+        int ScreenScale => Math.Max(1, Math.Min(ClientSize.Width / 400, ClientSize.Height / (bottom != null ? 480 : 240)));
 
         // Shows a frame ('pixels', w x h, RGB565; copied), with the input display
-        // for 'input' if it's given; or nothing, if 'pixels' is null. Returns how
-        // long drawing it took, in milliseconds.
-        public double Show(ushort[] pixels, int w, int h, FlbInput? input)
+        // for 'input' if it's given, and the bottom screen's frame under it
+        // ('bottom', bw x bh) if that's given; or nothing, if 'pixels' is null.
+        // Returns how long drawing it took, in milliseconds.
+        public double Show(ushort[] pixels, int w, int h, FlbInput? input, ushort[] bottom = null, int bw = 0, int bh = 0)
         {
             System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
             if (pixels == null)
@@ -103,8 +108,18 @@ namespace FlashbackStudio
                     this.pixels = new ushort[pixels.Length];
                 Array.Copy(pixels, this.pixels, pixels.Length);
             }
+            if (pixels == null || bottom == null)
+                this.bottom = null;
+            else
+            {
+                if (this.bottom == null || this.bottom.Length != bottom.Length)
+                    this.bottom = new ushort[bottom.Length];
+                Array.Copy(bottom, this.bottom, bottom.Length);
+            }
             clipW = w;
             clipH = h;
+            bottomW = bw;
+            bottomH = bh;
             this.input = input;
             Render();
             if (!Handles)
@@ -125,9 +140,12 @@ namespace FlashbackStudio
             int k = 400 * scale / clipW;    // (a half resolution clip at twice that)
             bgrW = clipW * k;
             bgrH = clipH * k;
-            if (bgr == null || bgr.Length != bgrW * bgrH * 3)
-                bgr = new byte[bgrW * bgrH * 3];
+            allH = bgrH + (bottom != null ? bottomH * k : 0);
+            if (bgr == null || bgr.Length != bgrW * allH * 3)
+                bgr = new byte[bgrW * allH * 3];    // (black, where nothing's drawn: beside the bottom screen)
             Converter.Scale(pixels, clipW, clipH, k, bgr);
+            if (bottom != null)
+                Converter.Scale(bottom, bottomW, bottomH, k, bgr, bgrW * 3, (clipW - bottomW) / 2 * k, bgrH);
             if (input.HasValue)
             {
                 // (Made again only for a new size: moving it, or another colour, is quick.)
@@ -152,7 +170,7 @@ namespace FlashbackStudio
         bool Handles => editing && bgr != null && input.HasValue && overlay != null;
 
         // Where the input display is, here.
-        Rectangle Box => new Rectangle((ClientSize.Width - bgrW) / 2 + overlay.X, (ClientSize.Height - bgrH) / 2 + overlay.Y,
+        Rectangle Box => new Rectangle((ClientSize.Width - bgrW) / 2 + overlay.X, (ClientSize.Height - allH) / 2 + overlay.Y,
                                        overlay.BoxWidth, overlay.BoxHeight);
 
         static Point Corner(Rectangle box, int corner) =>
@@ -243,19 +261,19 @@ namespace FlashbackStudio
             e.Graphics.Clear(Color.Black);
             if (bgr == null)
                 return;
-            int x = (ClientSize.Width - bgrW) / 2, y = (ClientSize.Height - bgrH) / 2;
+            int x = (ClientSize.Width - bgrW) / 2, y = (ClientSize.Height - allH) / 2;
             BitmapInfoHeader info = new BitmapInfoHeader
             {
                 Size = Marshal.SizeOf(typeof(BitmapInfoHeader)),
                 Width = bgrW,
-                Height = -bgrH,     // (top row first)
+                Height = -allH,     // (top row first)
                 Planes = 1,
                 BitCount = 24,
             };
             IntPtr dc = e.Graphics.GetHdc();
             try
             {
-                SetDIBitsToDevice(dc, x, y, bgrW, bgrH, 0, 0, 0, bgrH, bgr, ref info, 0);
+                SetDIBitsToDevice(dc, x, y, bgrW, allH, 0, 0, 0, allH, bgr, ref info, 0);
             }
             finally
             {
