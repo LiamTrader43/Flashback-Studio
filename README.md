@@ -12,7 +12,7 @@
 
 **The companion app for [Luma3DS-Flashback](https://github.com/LiamTrader43/Luma3DS-Flashback).** Watch, trim and share your 3DS clips with their sound and button presses, on the console or on Windows, where it also turns them into MP4 videos.
 
-> **Clips from Flashback v3.0 and newer need Flashback Studio v3.1 or newer.** Video players and editors can't open `.flb` clips, so use Flashback Studio for Windows to turn them into MP4s.
+> **Clips from Flashback v4.0 and newer need Flashback Studio v4.0 or newer.** Video players and editors can't open `.flb` clips, so use Flashback Studio for Windows to turn them into MP4s.
 
 ## What you need
 

@@ -22,7 +22,7 @@ A compacted clip has the same frames back to back, with no unused space, and eac
 
 ## Clips that store only what changes
 
-Clips saved since Flashback stores only what changes have 512 (`0x200`) added to their version as well. They can hold the bottom screen too (320x240, or 160x120 at half resolution): the trailer's last word is its width, plus its height times 65536, or 0 without it. They differ from the clips above in these ways:
+Clips saved by Flashback v4.0 and newer, which stores only what changes, have 512 (`0x200`) added to their version as well. They can hold the bottom screen too (320x240, or 160x120 at half resolution): the trailer's last word is its width, plus its height times 65536, or 0 without it. They differ from the clips above in these ways:
 
 * **Index entries are 24 bytes**, six 32-bit numbers, in every version: where the entry's frames are in the file, the size of the top screen's frame, the size of the bottom screen's, how many frames the entry is shown for, where it starts in the sound, and flags.
 * **An entry holds what's new at one moment:** the top screen's frame, the bottom screen's, or both. The bottom screen's frame comes after the top screen's, from the next multiple of 4 bytes. A screen whose size is 0 is as it was after the entry before. When neither screen has changed, there's no entry: the one before is shown for one more frame.
