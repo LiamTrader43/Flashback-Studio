@@ -23,6 +23,11 @@ namespace FlashbackStudio
         public long CompactSize;        // its size once compacted
         public Bitmap Thumb;            // its first frame, small, once read...
         public bool ThumbFailed;        // ...or if that failed
+        // A recording's part (see FlbRecording): the recording's parts, in
+        // order, and their frames in all (null and 0 for a clip on its own).
+        public List<string> RecordingParts;
+        public int RecordingFrames;
+        public bool IsRecording => RecordingParts != null;
 
         public string Mp4 => System.IO.Path.ChangeExtension(Path, ".mp4");
     }
@@ -55,6 +60,15 @@ namespace FlashbackStudio
                     (string.Equals(ext, ".raw", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.ChangeExtension(f, ".txt"))))
                     clips.Add(Read(f));
             }
+
+            // A recording's parts go together (exported as one).
+            Dictionary<string, List<string>> recordings = FlbRecording.Group(clips.Select(c => c.Path));
+            foreach (ClipInfo c in clips)
+                if (recordings.TryGetValue(c.Path, out List<string> parts))
+                {
+                    c.RecordingParts = parts;
+                    c.RecordingFrames = clips.Where(x => parts.Contains(x.Path, StringComparer.OrdinalIgnoreCase)).Sum(x => x.FrameCount);
+                }
             return clips;
         }
 

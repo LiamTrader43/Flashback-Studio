@@ -15,7 +15,9 @@
   <ItemGroup>
     <Compile Include="WindowsAppTest.cs" />
     <Compile Include="ScreensTest.cs" />
+    <Compile Include="RecordingTest.cs" />
     <Compile Include="..\..\windows-app\FlbClip.cs" />
+    <Compile Include="..\..\windows-app\FlbRecording.cs" />
     <Compile Include="..\..\windows-app\FlbCompactor.cs" />
     <Compile Include="..\..\windows-app\InputOverlay.cs" />
     <Compile Include="..\..\windows-app\Converter.cs" />

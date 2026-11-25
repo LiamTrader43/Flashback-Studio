@@ -51,6 +51,7 @@ namespace FlashbackStudio
         string exportFolder;            // where exports go (null: next to their clips), remembered
         int exportFirst, exportCount;   // the frames to export (all of them, or a trimmed part)...
         string exportPath;              // ...of this clip
+        List<string> exportParts;       // ...or of this recording, its parts as one (null: a clip)
 
         // The player, and its settings (kept until the app closes, as on the 3DS)
         Player player;
@@ -591,8 +592,9 @@ namespace FlashbackStudio
                     return;
                 case Mode.ConfirmExport:
                 {
-                    bool part = exportCount < c.FrameCount;
-                    string question = part ? "Export the selection as an MP4?" : "Export this clip as an MP4?";
+                    bool part = exportParts == null && exportCount < c.FrameCount;
+                    string question = exportParts != null ? "Export the whole recording as an MP4?" :
+                                      part ? "Export the selection as an MP4?" : "Export this clip as an MP4?";
                     string length = $"{Names.Length(exportCount, c.Fps)}{(c.HasAudio ? ", with sound" : "")} ";
                     p.Text(d, 1, Style.Info, question);
                     p.Text(d + 1, 1, Style.Normal, "Name");
@@ -626,10 +628,12 @@ namespace FlashbackStudio
                 }
                 case Mode.ConfirmExportAll:
                 {
-                    int ok = clips.Count(x => x.Error == null), have = clips.Count(x => x.Error == null && File.Exists(TargetMp4(x)));
+                    List<ClipInfo> items = ExportAllItems();
+                    int ok = items.Count, have = items.Count(x => File.Exists(TargetMp4(x)));
                     p.Text(d, 1, Style.Info, $"Export all {ok} clip{(ok == 1 ? "" : "s")} as MP4s?");
                     PaintExportFolder(p, d + 1, "next to each clip");
-                    p.Text(d + 2, 1, Style.Dim, "Each MP4 is named after its clip.");
+                    p.Text(d + 2, 1, Style.Dim, items.Any(x => x.IsRecording) ? "Each MP4 is named after its clip or recording."
+                                                                               : "Each MP4 is named after its clip.");
                     PaintVideoChoices(p, d + 3, null);
                     PaintBottomChoice(p, d + 4, PaintInputsChoice(p, d + 4, true) + 2);
                     PaintEncoderChoice(p, d + 5);
@@ -669,8 +673,12 @@ namespace FlashbackStudio
                     p.Text(d + 1, 1, Style.Normal, Names.Resolution(c.Width, c.Height, c.Fps, c.HasAudio));
                     p.Text(d + 2, 1, Style.Normal, $"Length {Names.Length(c.FrameCount, c.Fps)} ({c.FrameCount} frames), {Names.Size(c.FileSize)}");
                     p.Text(d + 3, 1, Style.Normal, c.MissedFrames == 0 ? "No missed frames" : $"Missed frames: {c.MissedFrames} (shown as copies)");
-                    p.Text(d + 4, 1, Style.Dim, c.IsRaw ? "From an older Flashback build (.raw)" : c.IsCompacted ? "Compacted" :
-                                                 $"Not compacted ({Names.Size(c.CompactSize)} once compacted)");
+                    if (c.IsRecording)
+                        p.Text(d + 4, 1, Style.Dim, $"Part {c.RecordingParts.IndexOf(c.Path) + 1} of {c.RecordingParts.Count} of a recording " +
+                                                    $"({Names.Length(c.RecordingFrames, c.Fps)} in all)");
+                    else
+                        p.Text(d + 4, 1, Style.Dim, c.IsRaw ? "From an older Flashback build (.raw)" : c.IsCompacted ? "Compacted" :
+                                                     $"Not compacted ({Names.Size(c.CompactSize)} once compacted)");
                     if (message == null && c.HasBottom)
                         p.Text(d + 5, 1, Style.Dim, (c.HasInputs ? "Both screens and inputs recorded" : "Both screens recorded, no inputs") +
                                                     (HasMp4(c) ? "; has an MP4" : ""));
@@ -1073,11 +1081,23 @@ namespace FlashbackStudio
             return Path.Combine(ExportDir(), name + ".mp4");
         }
 
-        // Where clip c's MP4 goes when every clip is exported.
-        string TargetMp4(ClipInfo c) => Path.Combine(ExportDir(), Path.GetFileNameWithoutExtension(c.Name) + ".mp4");
+        // Where clip c's MP4 goes when every clip is exported (a recording's part:
+        // the recording's, named after it).
+        string TargetMp4(ClipInfo c) =>
+            Path.Combine(ExportDir(), (c.IsRecording ? FlbRecording.NameOf(c.Path) : Path.GetFileNameWithoutExtension(c.Name)) + ".mp4");
+
+        // What Export all exports: each clip that can be read, and each recording
+        // once (for its first part), all of it.
+        List<ClipInfo> ExportAllItems() =>
+            clips.Where(c => c.Error == null && (!c.IsRecording || string.Equals(c.Path, c.RecordingParts[0], StringComparison.OrdinalIgnoreCase)))
+                 .ToList();
+
+        // The frames an export of clip c exports: a recording's, all of them.
+        static int ExportFrames(ClipInfo c) => c.IsRecording ? c.RecordingFrames : c.FrameCount;
 
         // Whether clip c has been exported (with its own name), next to it or where exports go.
-        bool HasMp4(ClipInfo c) => File.Exists(c.Mp4) || (exportFolder != null && File.Exists(TargetMp4(c)));
+        bool HasMp4(ClipInfo c) => File.Exists(c.Mp4) || File.Exists(Path.Combine(Path.GetDirectoryName(c.Path), Path.GetFileName(TargetMp4(c)))) ||
+                                   (exportFolder != null && File.Exists(TargetMp4(c)));
 
         // Why the export folder can't be used, or null.
         string ExportFolderProblem() =>
@@ -1207,13 +1227,17 @@ namespace FlashbackStudio
                 return;
             exportPath = c.Path;
             exportFirst = 0;
-            exportCount = c.FrameCount;
-            AskExportName(Path.GetFileNameWithoutExtension(c.Name));
+            // (A recording's part: all of the recording, its parts as one, if they can all be read.)
+            bool recording = c.IsRecording && c.RecordingParts.All(part => clips.Any(x => x.Error == null &&
+                                                                                       string.Equals(x.Path, part, StringComparison.OrdinalIgnoreCase)));
+            exportParts = recording ? c.RecordingParts : null;
+            exportCount = recording ? c.RecordingFrames : c.FrameCount;
+            AskExportName(recording ? FlbRecording.NameOf(c.Path) : Path.GetFileNameWithoutExtension(c.Name));
         }
 
         void AskExportAll()
         {
-            if (!clips.Any(c => c.Error == null) || !CheckFfmpeg())
+            if (ExportAllItems().Count == 0 || !CheckFfmpeg())
                 return;
             CheckGpu();
             mode = Mode.ConfirmExportAll;
@@ -1235,6 +1259,7 @@ namespace FlashbackStudio
             if (mode == Mode.ConfirmExport)
             {
                 string path = exportPath, mp4 = ExportMp4(), name = Path.GetFileName(mp4);
+                List<string> parts = exportParts;
                 int firstFrame = exportFirst, count = exportCount;
                 mode = Mode.List;
                 RunJob("Exporting...", name, token =>
@@ -1243,8 +1268,8 @@ namespace FlashbackStudio
                     try
                     {
                         ExportEncoder encoder = Encoder();
-                        using (FlbClip clip = FlbClip.Open(path))
-                            Converter.ToMp4(clip, firstFrame, count, mp4, inputs, both, size, scaling, encoder, ffmpeg,
+                        using (IFlbVideo video = OpenVideo(path, parts))
+                            Converter.ToMp4(video, firstFrame, count, mp4, inputs, both, size, scaling, encoder, ffmpeg,
                                             done => Progress((double)done / ((double)count * passes), FramesDone(done, count, passes)), token);
                     }
                     catch (OperationCanceledException)
@@ -1259,7 +1284,7 @@ namespace FlashbackStudio
                 return;
             }
 
-            List<ClipInfo> all = clips.Where(c => c.Error == null).ToList();
+            List<ClipInfo> all = ExportAllItems();
             if (ExportFolderProblem() != null)
                 return;
             List<ClipInfo> todo = all.Where(c => exportReplace || !File.Exists(TargetMp4(c))).ToList();
@@ -1273,19 +1298,21 @@ namespace FlashbackStudio
             string dir = ExportDir();
             RunJob("Exporting...", "", token =>
             {
-                long total = Math.Max(1, todo.Sum(c => (long)c.FrameCount) * passes), before = 0;
+                long total = Math.Max(1, todo.Sum(c => (long)ExportFrames(c)) * passes), before = 0;
                 int exported = 0, failures = 0;
                 string failed = null;
                 ExportEncoder encoder = Encoder();
                 for (int i = 0; i < todo.Count; i++)
                 {
                     ClipInfo c = todo[i];
-                    jobName = $"Clip {i + 1} of {todo.Count}: {c.Name}";
+                    string what = c.IsRecording ? $"{FlbRecording.NameOf(c.Path)} ({c.RecordingParts.Count} files)" : c.Name;
+                    jobName = $"Clip {i + 1} of {todo.Count}: {what}";
+                    int frames = ExportFrames(c);
                     try
                     {
-                        using (FlbClip clip = FlbClip.Open(c.Path))
-                            Converter.ToMp4(clip, TargetMp4(c), inputs, both, size, scaling, encoder, ffmpeg,
-                                            done => Progress((before + done) / (double)total, FramesDone(done, c.FrameCount, passes)), token);
+                        using (IFlbVideo video = OpenVideo(c.Path, c.IsRecording ? c.RecordingParts : null))
+                            Converter.ToMp4(video, TargetMp4(c), inputs, both, size, scaling, encoder, ffmpeg,
+                                            done => Progress((before + done) / (double)total, FramesDone(done, frames, passes)), token);
                         exported++;
                     }
                     catch (OperationCanceledException)
@@ -1295,9 +1322,9 @@ namespace FlashbackStudio
                     catch (Exception e)
                     {
                         failures++;
-                        failed = failed ?? $"{c.Name}: {e.Message}";
+                        failed = failed ?? $"{what}: {e.Message}";
                     }
-                    before += (long)c.FrameCount * passes;
+                    before += (long)frames * passes;
                 }
                 string result = $"Exported {exported} clip{(exported == 1 ? "" : "s")}";
                 if (skipped > 0)
@@ -1309,6 +1336,11 @@ namespace FlashbackStudio
                 return (result + ".", failures == 0, null);
             });
         }
+
+        // What an export reads from: the clip at 'path', or with 'parts', the
+        // recording made of those, as one (see FlbRecording).
+        static IFlbVideo OpenVideo(string path, List<string> parts) =>
+            parts == null ? (IFlbVideo)FlbClip.Open(path) : FlbRecording.Open(parts);
 
         // An export's progress line, 'done' frames into 'count' (counting both
         // passes' frames, if there are two: a Discord export).
@@ -1603,6 +1635,7 @@ namespace FlashbackStudio
             Player pl = player;
             bool part = pl.TrimMode && !pl.TrimIsWhole;
             exportPath = pl.Clip.Path;
+            exportParts = null;
             exportFirst = part ? pl.TrimIn : 0;
             exportCount = part ? pl.TrimOut + 1 - pl.TrimIn : pl.Count;
             ClosePlayer();

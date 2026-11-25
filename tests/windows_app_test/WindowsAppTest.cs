@@ -18,7 +18,9 @@
 //    too, if this PC has an NVIDIA card; and for Discord: its bitrates, and
 //    exports fitting in their limit (or refused if they can't);
 //  - all of that for clips with screens (both screens, frames of what changed,
-//    entries that are only read): see ScreensTest.cs.
+//    entries that are only read): see ScreensTest.cs;
+//  - and recordings, a recording's parts read and exported as one: see
+//    RecordingTest.cs.
 //
 // usage: WindowsAppTest <overlay_ref.exe> <compact_ref.exe>
 // It writes its clips in the current folder.
@@ -72,6 +74,8 @@ static partial class WindowsAppTest
         public int[] Copies;            // each entry's
         public bool Audio, Inputs, Compacted;
         public bool Codes;              // the version flag: some compressed frames packed with Huffman codes (if they fit)
+        public int Pictures;            // entry e shows picture Pictures + e (PixelOf): another clip's, from another number
+        public bool AudioGiven;         // (with sound) First, End, TrackStart and Capacity are given, not worked out
         public int Frames => Copies.Sum();
         public int Version => Audio ? 3 : Compacted ? 2 : 1;
         // (with sound) the samples the clip holds, where its track starts, and the ring's size
@@ -214,7 +218,7 @@ static partial class WindowsAppTest
         ushort[] px = new ushort[s.Width * s.Height];
         for (int y = 0; y < s.Height; y++)
             for (int x = 0; x < s.Width; x++)
-                px[y * s.Width + x] = PixelOf(e, x, y);
+                px[y * s.Width + x] = PixelOf(s.Pictures + e, x, y);
         byte[] packed = Compress(px);
         if (s.Codes && e % 4 == 3 && packed.Length < px.Length * 2)
         {
@@ -238,7 +242,7 @@ static partial class WindowsAppTest
         int entries = s.Copies.Length, slotBytes = s.Width * s.Height * 2, stride = slotBytes + SlotPad;
         int slots = entries + 2, firstSlot = entries / 2;      // (recorded: the ring wraps)
         byte[][] stored = Enumerable.Range(0, entries).Select(e => Stored(s, e)).ToArray();
-        if (s.Audio)
+        if (s.Audio && !s.AudioGiven)
         {
             if (s.Compacted)
             {
@@ -1354,6 +1358,7 @@ static partial class WindowsAppTest
         TestOverlay(Path.GetFullPath(args[0]));
         TestInputLayout();
         TestDiscordBitrates();
+        TestRecordings();
         string ffmpeg = Converter.FindFfmpeg();
         if (ffmpeg == null)
             Console.WriteLine("ffmpeg isn't on PATH: the exports weren't tested");
@@ -1362,6 +1367,7 @@ static partial class WindowsAppTest
             int before = checks;
             TestConversions(ffmpeg);
             TestScreensConversions(ffmpeg);
+            TestRecordingConversions(ffmpeg);
             Console.WriteLine($"{checks - before} exports checked, with {ffmpeg}");
         }
         Console.WriteLine($"{(errors != 0 ? "FAILED" : "all good")} ({errors} errors)");

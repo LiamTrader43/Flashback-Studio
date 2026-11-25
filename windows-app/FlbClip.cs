@@ -37,7 +37,7 @@ namespace FlashbackStudio
     // to back in a .raw, with a .txt next to it saying their resolution and frame
     // rate. They play and export like the others (as if each frame were an index
     // entry), but can't be compacted or trimmed.
-    sealed class FlbClip : IDisposable
+    sealed class FlbClip : IFlbVideo, IDisposable
     {
         const uint Magic = 0x4B424C46;          // "FLBK"
         const uint InputMagic = 0x49424C46;     // "FLBI"
@@ -91,6 +91,7 @@ namespace FlashbackStudio
         public bool HasAudio { get; private set; }
         public long AudioRateMhz { get; private set; }  // the sound's sample rate, in millihertz
         public long AudioMissed { get; private set; }
+        public long AudioCapacity => audioCapacity;     // samples its sound's ring has room for (sample i is at i % AudioCapacity)
         public FlbInput[] Inputs { get; private set; }  // the inputs during each frame, or null if the clip has none
 
         // Compacted already (version 2, or 3 without slots)?
@@ -874,21 +875,7 @@ namespace FlashbackStudio
         public void WriteWav(string wav, int firstFrame, int frameCount)
         {
             long start = AudioPosOf(firstFrame), count = AudioSamplesIn(frameCount);
-            long rate = (AudioRateMhz + 500) / 1000;
-            byte[] header = new byte[44];
-            Encoding.ASCII.GetBytes("RIFF").CopyTo(header, 0);
-            Put32(header, 4, 36 + count * 4);
-            Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(header, 8);
-            Put32(header, 16, 16);
-            Put16(header, 20, 1);       // PCM
-            Put16(header, 22, 2);       // stereo
-            Put32(header, 24, rate);
-            Put32(header, 28, rate * 4);
-            Put16(header, 32, 4);
-            Put16(header, 34, 16);
-            Encoding.ASCII.GetBytes("data").CopyTo(header, 36);
-            Put32(header, 40, count * 4);
-
+            byte[] header = WavHeader(count, AudioRateMhz);
             using (FileStream o = new FileStream(wav, FileMode.Create, FileAccess.Write))
             {
                 o.Write(header, 0, header.Length);
@@ -906,5 +893,25 @@ namespace FlashbackStudio
         }
 
         public void WriteWav(string wav) => WriteWav(wav, 0, FrameCount);
+
+        // A WAV file's header, for 'count' stereo PCM16 samples at 'rateMhz' millihertz.
+        public static byte[] WavHeader(long count, long rateMhz)
+        {
+            long rate = (rateMhz + 500) / 1000;
+            byte[] header = new byte[44];
+            Encoding.ASCII.GetBytes("RIFF").CopyTo(header, 0);
+            Put32(header, 4, 36 + count * 4);
+            Encoding.ASCII.GetBytes("WAVEfmt ").CopyTo(header, 8);
+            Put32(header, 16, 16);
+            Put16(header, 20, 1);       // PCM
+            Put16(header, 22, 2);       // stereo
+            Put32(header, 24, rate);
+            Put32(header, 28, rate * 4);
+            Put16(header, 32, 4);
+            Put16(header, 34, 16);
+            Encoding.ASCII.GetBytes("data").CopyTo(header, 36);
+            Put32(header, 40, count * 4);
+            return header;
+        }
     }
 }

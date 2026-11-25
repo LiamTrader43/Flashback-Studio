@@ -72,11 +72,11 @@ namespace FlashbackStudio
         // or with 'bottom', if it has a bottom screen, both screens: the top
         // one, and the bottom one under it, centred, with black beside it
         // (400 x 480 for a full resolution clip).
-        public static (int W, int H) PictureSize(FlbClip clip, bool bottom) =>
+        public static (int W, int H) PictureSize(IFlbVideo clip, bool bottom) =>
             (clip.Width, bottom && clip.HasBottom ? clip.Height + clip.BottomHeight : clip.Height);
 
         // An export's video's size, for 'clip' with its bottom screen or not.
-        public static (int W, int H) VideoSize(FlbClip clip, bool bottom, ExportSize size)
+        public static (int W, int H) VideoSize(IFlbVideo clip, bool bottom, ExportSize size)
         {
             (int w, int h) = PictureSize(clip, bottom);
             return VideoSize(w, h, size);
@@ -222,26 +222,27 @@ namespace FlashbackStudio
         // Both of 'clip''s screens ('top' and 'bottom', RGB565) at 'k' times the
         // size into 'frame' (BGR, PictureSize at 'k' times: the black beside the
         // bottom screen is left as it is).
-        public static void Stack(FlbClip clip, ushort[] top, ushort[] bottom, int k, byte[] frame)
+        public static void Stack(IFlbVideo clip, ushort[] top, ushort[] bottom, int k, byte[] frame)
         {
             int stride = clip.Width * k * 3;
             Scale(top, clip.Width, clip.Height, k, frame, stride, 0, 0);
             Scale(bottom, clip.BottomWidth, clip.BottomHeight, k, frame, stride, (clip.Width - clip.BottomWidth) / 2 * k, clip.Height * k);
         }
 
-        // Exports 'clip' as the MP4 'mp4', replacing it if it exists, with ffmpeg
-        // at 'ffmpeg', with the input display where 'inputs' says (if it isn't
-        // null, and the clip has inputs). 'progress' is told how many frames are
+        // Exports 'clip' (a clip, or a recording's parts: FlbRecording) as the
+        // MP4 'mp4', replacing it if it exists, with ffmpeg at 'ffmpeg', with the
+        // input display where 'inputs' says (if it isn't null, and the clip has
+        // inputs). 'progress' is told how many frames are
         // done, now and then. Throws OperationCanceledException if 'cancel' stops
         // it, or another exception saying what went wrong; either way, an MP4
         // that was there is left as it was, and nothing else is left behind.
-        public static void ToMp4(FlbClip clip, string mp4, InputLayout? inputs, ExportSize size, ExportScaling scaling,
+        public static void ToMp4(IFlbVideo clip, string mp4, InputLayout? inputs, ExportSize size, ExportScaling scaling,
                                  ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
             ToMp4(clip, 0, clip.FrameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel);
 
         // The same, with the bottom screen under the top one if 'bottom' (and
         // the clip has one).
-        public static void ToMp4(FlbClip clip, string mp4, InputLayout? inputs, bool bottom, ExportSize size, ExportScaling scaling,
+        public static void ToMp4(IFlbVideo clip, string mp4, InputLayout? inputs, bool bottom, ExportSize size, ExportScaling scaling,
                                  ExportEncoder encoder, string ffmpeg, Action<int> progress, CancellationToken cancel) =>
             ToMp4(clip, 0, clip.FrameCount, mp4, inputs, bottom, size, scaling, encoder, ffmpeg, progress, cancel);
 
@@ -252,13 +253,13 @@ namespace FlashbackStudio
         // encoded by the CPU whatever 'encoder' says (NVENC can't aim at a
         // size as well), and if it still comes out over the limit (it never
         // did on real clips), the second pass is done again at a lower bitrate.
-        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
+        public static void ToMp4(IFlbVideo clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
                                  Action<int> progress, CancellationToken cancel) =>
             ToMp4(clip, firstFrame, frameCount, mp4, inputs, size, scaling, encoder, ffmpeg, progress, cancel, DiscordLimit);
 
         // The same, a Discord export fitting in 'limit' bytes (for the tests).
-        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
+        public static void ToMp4(IFlbVideo clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
                                  Action<int> progress, CancellationToken cancel, long limit) =>
             ToMp4(clip, firstFrame, frameCount, mp4, inputs, false, size, scaling, encoder, ffmpeg, progress, cancel, limit);
@@ -266,7 +267,7 @@ namespace FlashbackStudio
         // The same, with the bottom screen under the top one if 'bottom' (and
         // the clip has one). The input display stays on the top screen, as big
         // as on a video of the top screen alone.
-        public static void ToMp4(FlbClip clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs, bool bottom,
+        public static void ToMp4(IFlbVideo clip, int firstFrame, int frameCount, string mp4, InputLayout? inputs, bool bottom,
                                  ExportSize size, ExportScaling scaling, ExportEncoder encoder, string ffmpeg,
                                  Action<int> progress, CancellationToken cancel, long limit = DiscordLimit)
         {
@@ -364,7 +365,7 @@ namespace FlashbackStudio
         // drawn over them by 'overlay' (if it isn't null), to an ffmpeg started
         // with 'args', and waits for it to finish. 'progress' is told how many
         // frames are done, now and then.
-        static void Encode(FlbClip clip, int firstFrame, int frameCount, bool both, int w, int h, bool here, ExportScaling scaling,
+        static void Encode(IFlbVideo clip, int firstFrame, int frameCount, bool both, int w, int h, bool here, ExportScaling scaling,
                            InputOverlay overlay, string ffmpeg, string args, Action<int> progress, CancellationToken cancel)
         {
             Process p = null, scaler = null;
@@ -558,7 +559,7 @@ namespace FlashbackStudio
         // both its screens, if 'both') to the scaler's input, after adding how
         // many times each is shown to 'sent', and then closes both. Returns
         // what stopped it early (a damaged frame, or the scaler gone), or null.
-        static Exception Feed(FlbClip clip, int firstFrame, int frameCount, bool both, Stream toScaler, BlockingCollection<int> sent)
+        static Exception Feed(IFlbVideo clip, int firstFrame, int frameCount, bool both, Stream toScaler, BlockingCollection<int> sent)
         {
             try
             {

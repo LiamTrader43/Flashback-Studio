@@ -133,8 +133,8 @@ test won't build until it has one.
 
 `windows_app_test/WindowsAppTest.cs` is built with the Windows app's own clip
 reader, compactor, input display and export code (`windows-app/FlbClip.cs`,
-`FlbCompactor.cs`, `InputOverlay.cs` and `Converter.cs`), and runs in
-`build/windows_app/`.
+`FlbRecording.cs`, `FlbCompactor.cs`, `InputOverlay.cs` and `Converter.cs`),
+and runs in `build/windows_app/`.
 
 It writes clips of every version: as the recorder saves them, with the ring of
 frames and the sound wrapping around, and as Studio compacts them. It varies
@@ -196,3 +196,14 @@ and come close to them, once after doing its second pass again; a limit it
 can't get under must be refused after two more tries, and one too small to
 try, at once. Stopping in either pass, and a damaged clip, must leave nothing
 behind, x264's files from the first pass included.
+
+Recordings (`RecordingTest.cs`, with `windows-app/FlbRecording.cs`): a
+recording's parts, written as clips with pictures of their own (as recorded
+and compacted, with sound and inputs), must read as one: every frame, from any
+frame to any other, its part's picture; the inputs, one part's after another's;
+and the sound, each part's for its frames, as many samples in all as the frames
+last. Parts are found by their names (`<name>_part01.flb`, ...): a part on its
+own isn't a recording, and a part missing ends one there. A part recorded at
+another size is turned down, naming it. With ffmpeg, the whole recording, and
+part of it across where a part starts, are exported as one MP4, and every frame
+must show its part's picture, with the sound lasting as long.
